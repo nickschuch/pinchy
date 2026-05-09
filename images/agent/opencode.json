@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["/home/skpr/.opencode/environment.md"],
+  "default_agent": "plan",
+  "mode": {
+    "plan": {
+      "model": "anthropic/claude-opus-4-7"
+    },
+    "build": {
+      "model": "anthropic/claude-sonnet-4-6"
+    }
+  }
+}
