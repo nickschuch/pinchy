@@ -104,6 +104,29 @@ Pass `--no-browser` to skip the browser open and just print the URL.
 | Browser | `http://example.pinchy.localhost:4096/` |
 | Open web UI | `pinchy open example` |
 | Shell | `pinchy shell example` |
+| Attach local opencode | `opencode attach http://example.pinchy.localhost:4096` |
+
+### Attach with the opencode CLI
+
+If you have `opencode` installed on the host, you can drive a pinchy
+environment from your local terminal instead of the browser. Each agent's
+opencode web server is reachable through the shared proxy at:
+
+```
+http://<env>.pinchy.localhost:4096/
+```
+
+Attach to it with:
+
+```
+opencode attach http://example.pinchy.localhost:4096
+```
+
+You get the local opencode TUI while the agent, its tools, and its dedicated
+dind daemon all run inside the pinchy environment.
+
+`pinchy open <name>` prints the same URL, so the env name is the only thing
+you need to remember.
 
 ## Commands
 
