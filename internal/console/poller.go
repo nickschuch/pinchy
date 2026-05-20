@@ -150,6 +150,9 @@ func (p *Poller) fetchSessions(ctx context.Context, e pinchyenv.Environment) ([]
 // fetchSessionsFromURL is the low-level implementation of fetchSessions. It is
 // extracted so tests can supply an arbitrary URL (via httptest.Server) without
 // needing a real Docker daemon.
+//
+// baseURL is the root of the opencode server (e.g. "http://host:4096"). The
+// individual endpoint paths are appended by this function.
 func (p *Poller) fetchSessionsFromURL(sessionsURL, statusURL, username, password string) ([]SessionInfo, string) {
 	sessions, fetchErr := p.fetchSessionList(sessionsURL, username, password)
 	if fetchErr != "" {
@@ -169,7 +172,45 @@ func (p *Poller) fetchSessionsFromURL(sessionsURL, statusURL, username, password
 		}
 	}
 
+	// For sessions that are idle, fetch the last message to determine whether
+	// the agent is waiting for a reply ("question") or blocked on a permission
+	// approval ("permission"). Only idle sessions need this extra call; busy
+	// and retrying sessions are already described precisely by their status.
+	//
+	// The messages URL is derived from the sessions URL by replacing the path
+	// suffix: sessionsURL is ".../session", so the per-session messages URL is
+	// ".../session/<id>/message?limit=1".
+	messagesBase := sessionsURL // e.g. "http://host:4096/session"
+	for i := range sessions {
+		if sessions[i].Status.Type != "idle" {
+			continue
+		}
+		msgURL := messagesBase + "/" + sessions[i].ID + "/message?limit=1"
+		sessions[i].Status = p.enrichIdleStatus(msgURL, username, password)
+	}
+
 	return sessions, ""
+}
+
+// enrichIdleStatus fetches the last message for an idle session and returns a
+// refined SessionStatus:
+//   - "permission" if the last message is from the assistant and contains a
+//     tool call that is still in the "pending" state (blocked for approval)
+//   - "question"   if the last message is from the assistant with no pending tool
+//   - "idle"       if the last message is from the user, the list is empty, or
+//     the fetch fails
+func (p *Poller) enrichIdleStatus(msgURL, username, password string) SessionStatus {
+	role, hasPendingTool, err := p.fetchLastMessage(msgURL, username, password)
+	if err != nil {
+		return SessionStatus{Type: "idle"}
+	}
+	if role != "assistant" {
+		return SessionStatus{Type: "idle"}
+	}
+	if hasPendingTool {
+		return SessionStatus{Type: "permission"}
+	}
+	return SessionStatus{Type: "question"}
 }
 
 // fetchSessionList performs the GET /session request and returns the decoded
@@ -230,6 +271,69 @@ func (p *Poller) fetchSessionStatusMap(url, username, password string) (map[stri
 		return nil, fmt.Sprintf("decoding session status: %v", err)
 	}
 	return statusMap, ""
+}
+
+// lastMessageEntry is a minimal decode target for one entry returned by
+// GET /session/:id/message?limit=1. We only need the role from info and the
+// state.status from each part — everything else is discarded.
+type lastMessageEntry struct {
+	Info  struct {
+		Role string `json:"role"`
+	} `json:"info"`
+	Parts []struct {
+		Type  string `json:"type"`
+		State struct {
+			Status string `json:"status"`
+		} `json:"state"`
+	} `json:"parts"`
+}
+
+// fetchLastMessage calls GET <msgURL> (which should include "?limit=1") and
+// returns:
+//   - role: "assistant" or "user" (empty string on empty list or error)
+//   - hasPendingTool: true if any part in the last message is a tool call with
+//     state.status == "pending"
+//   - err: non-nil only on HTTP / decode failure
+//
+// A 404 or non-OK response is treated as an empty list (no error).
+func (p *Poller) fetchLastMessage(msgURL, username, password string) (role string, hasPendingTool bool, err error) {
+	req, err := http.NewRequest(http.MethodGet, msgURL, nil)
+	if err != nil {
+		return "", false, err
+	}
+	if password != "" {
+		req.SetBasicAuth(username, password)
+	}
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return "", false, err
+	}
+	defer resp.Body.Close()
+
+	// Any non-200 (including 404 for sessions with no messages) is treated as
+	// "no information" rather than a hard error — the caller defaults to idle.
+	if resp.StatusCode != http.StatusOK {
+		return "", false, nil
+	}
+
+	var entries []lastMessageEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+		return "", false, err
+	}
+	if len(entries) == 0 {
+		return "", false, nil
+	}
+
+	last := entries[len(entries)-1]
+	role = last.Info.Role
+	for _, part := range last.Parts {
+		if part.Type == "tool" && part.State.Status == "pending" {
+			hasPendingTool = true
+			break
+		}
+	}
+	return role, hasPendingTool, nil
 }
 
 // resolveAuth inspects the agent container to find OPENCODE_SERVER_PASSWORD

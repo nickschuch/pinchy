@@ -133,6 +133,8 @@ func TestDashboardSessionStatusBadges(t *testing.T) {
 			{ID: "ses_1", Title: "Idle session", Status: SessionStatus{Type: "idle"}},
 			{ID: "ses_2", Title: "Busy session", Status: SessionStatus{Type: "busy"}},
 			{ID: "ses_3", Title: "Retry session", Status: SessionStatus{Type: "retry", Attempt: 1, Message: "rate limited"}},
+			{ID: "ses_4", Title: "Question session", Status: SessionStatus{Type: "question"}},
+			{ID: "ses_5", Title: "Permission session", Status: SessionStatus{Type: "permission"}},
 		},
 	}
 
@@ -164,6 +166,18 @@ func TestDashboardSessionStatusBadges(t *testing.T) {
 	// Retry tooltip should include the error message.
 	if !strings.Contains(html, "rate limited") {
 		t.Error("expected retry message 'rate limited' in output")
+	}
+	if !strings.Contains(html, "badge-question") {
+		t.Error("expected badge-question in output")
+	}
+	if !strings.Contains(html, "needs input") {
+		t.Error("expected 'needs input' label for question session")
+	}
+	if !strings.Contains(html, "badge-permission") {
+		t.Error("expected badge-permission in output")
+	}
+	if !strings.Contains(html, "needs approval") {
+		t.Error("expected 'needs approval' label for permission session")
 	}
 }
 

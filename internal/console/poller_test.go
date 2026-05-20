@@ -90,6 +90,8 @@ func TestResolveEnvStatus(t *testing.T) {
 
 // TestFetchSessionsSuccess verifies that fetchSessions decodes a valid JSON
 // session list from a mock opencode server and merges in session status.
+// ses_abc is busy (no message fetch); ses_def is idle with a user last-message
+// (stays idle after enrichment).
 func TestFetchSessionsSuccess(t *testing.T) {
 	wantSessions := []SessionInfo{
 		{ID: "ses_abc", Title: "My first task", Agent: "plan", Model: SessionModel{ID: "claude-opus-4"}},
@@ -99,6 +101,9 @@ func TestFetchSessionsSuccess(t *testing.T) {
 		"ses_abc": {Type: "busy"},
 		"ses_def": {Type: "idle"},
 	}
+	// ses_def: last message is from the user → stays idle after enrichment.
+	defMessages := []lastMessageEntry{{}}
+	defMessages[0].Info.Role = "user"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -107,6 +112,8 @@ func TestFetchSessionsSuccess(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(wantSessions)
 		case "/session/status":
 			_ = json.NewEncoder(w).Encode(wantStatus)
+		case "/session/ses_def/message":
+			_ = json.NewEncoder(w).Encode(defMessages)
 		default:
 			http.NotFound(w, r)
 		}
@@ -145,6 +152,9 @@ func TestFetchSessionsStatusFallback(t *testing.T) {
 	wantSessions := []SessionInfo{
 		{ID: "ses_abc", Title: "My first task", Agent: "plan"},
 	}
+	// Last message is from the user → stays idle after enrichment.
+	abcMessages := []lastMessageEntry{{}}
+	abcMessages[0].Info.Role = "user"
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -153,6 +163,8 @@ func TestFetchSessionsStatusFallback(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(wantSessions)
 		case "/session/status":
 			http.Error(w, "not implemented", http.StatusInternalServerError)
+		case "/session/ses_abc/message":
+			_ = json.NewEncoder(w).Encode(abcMessages)
 		default:
 			http.NotFound(w, r)
 		}
@@ -254,6 +266,204 @@ func TestFetchSessionsServerError(t *testing.T) {
 	}
 	if errMsg == "" {
 		t.Error("expected non-empty errMsg on 500")
+	}
+}
+
+// TestFetchLastMessageQuestion verifies that an idle session whose last message
+// is from the assistant (with no pending tool) is enriched to "question".
+func TestFetchLastMessageQuestion(t *testing.T) {
+	// Assistant message, no tool parts.
+	msgs := []lastMessageEntry{{}}
+	msgs[0].Info.Role = "assistant"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(msgs)
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	role, pending, err := p.fetchLastMessage(srv.URL+"/message", "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if role != "assistant" {
+		t.Errorf("role = %q, want %q", role, "assistant")
+	}
+	if pending {
+		t.Error("expected hasPendingTool = false for assistant message with no tool parts")
+	}
+
+	st := p.enrichIdleStatus(srv.URL+"/message", "", "")
+	if st.Type != "question" {
+		t.Errorf("enrichIdleStatus = %q, want %q", st.Type, "question")
+	}
+}
+
+// TestFetchLastMessagePermission verifies that an idle session whose last
+// assistant message contains a pending tool part is enriched to "permission".
+func TestFetchLastMessagePermission(t *testing.T) {
+	msgs := []lastMessageEntry{{}}
+	msgs[0].Info.Role = "assistant"
+	msgs[0].Parts = []struct {
+		Type  string `json:"type"`
+		State struct {
+			Status string `json:"status"`
+		} `json:"state"`
+	}{
+		{Type: "tool", State: struct {
+			Status string `json:"status"`
+		}{Status: "pending"}},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(msgs)
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	role, pending, err := p.fetchLastMessage(srv.URL+"/message", "", "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if role != "assistant" {
+		t.Errorf("role = %q, want %q", role, "assistant")
+	}
+	if !pending {
+		t.Error("expected hasPendingTool = true for assistant message with pending tool part")
+	}
+
+	st := p.enrichIdleStatus(srv.URL+"/message", "", "")
+	if st.Type != "permission" {
+		t.Errorf("enrichIdleStatus = %q, want %q", st.Type, "permission")
+	}
+}
+
+// TestFetchLastMessageUserRole verifies that an idle session whose last message
+// is from the user stays idle after enrichment.
+func TestFetchLastMessageUserRole(t *testing.T) {
+	msgs := []lastMessageEntry{{}}
+	msgs[0].Info.Role = "user"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(msgs)
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	st := p.enrichIdleStatus(srv.URL+"/message", "", "")
+	if st.Type != "idle" {
+		t.Errorf("enrichIdleStatus = %q, want %q", st.Type, "idle")
+	}
+}
+
+// TestFetchLastMessageEmpty verifies that an empty message list leaves the
+// session as idle.
+func TestFetchLastMessageEmpty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]lastMessageEntry{})
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	st := p.enrichIdleStatus(srv.URL+"/message", "", "")
+	if st.Type != "idle" {
+		t.Errorf("enrichIdleStatus = %q, want %q", st.Type, "idle")
+	}
+}
+
+// TestFetchLastMessageFetchError verifies that a failed message fetch leaves
+// the session as idle rather than propagating the error.
+func TestFetchLastMessageFetchError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	st := p.enrichIdleStatus(srv.URL+"/message", "", "")
+	if st.Type != "idle" {
+		t.Errorf("enrichIdleStatus = %q, want %q", st.Type, "idle")
+	}
+}
+
+// TestFetchSessionsQuestionEnrichment verifies the full pipeline: an idle
+// session is enriched to "question" when its last message is from the assistant.
+func TestFetchSessionsQuestionEnrichment(t *testing.T) {
+	sessions := []SessionInfo{{ID: "ses_q", Title: "Needs reply", Agent: "plan"}}
+	status := map[string]SessionStatus{"ses_q": {Type: "idle"}}
+	msgs := []lastMessageEntry{{}}
+	msgs[0].Info.Role = "assistant"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/session":
+			_ = json.NewEncoder(w).Encode(sessions)
+		case "/session/status":
+			_ = json.NewEncoder(w).Encode(status)
+		case "/session/ses_q/message":
+			_ = json.NewEncoder(w).Encode(msgs)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	got, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
+	if errMsg != "" {
+		t.Fatalf("unexpected error: %s", errMsg)
+	}
+	if got[0].Status.Type != "question" {
+		t.Errorf("Status.Type = %q, want %q", got[0].Status.Type, "question")
+	}
+}
+
+// TestFetchSessionsPermissionEnrichment verifies the full pipeline: an idle
+// session is enriched to "permission" when its last assistant message contains
+// a pending tool part.
+func TestFetchSessionsPermissionEnrichment(t *testing.T) {
+	sessions := []SessionInfo{{ID: "ses_p", Title: "Needs approval", Agent: "plan"}}
+	status := map[string]SessionStatus{"ses_p": {Type: "idle"}}
+	msgs := []lastMessageEntry{{}}
+	msgs[0].Info.Role = "assistant"
+	msgs[0].Parts = []struct {
+		Type  string `json:"type"`
+		State struct {
+			Status string `json:"status"`
+		} `json:"state"`
+	}{
+		{Type: "tool", State: struct {
+			Status string `json:"status"`
+		}{Status: "pending"}},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/session":
+			_ = json.NewEncoder(w).Encode(sessions)
+		case "/session/status":
+			_ = json.NewEncoder(w).Encode(status)
+		case "/session/ses_p/message":
+			_ = json.NewEncoder(w).Encode(msgs)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	got, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
+	if errMsg != "" {
+		t.Fatalf("unexpected error: %s", errMsg)
+	}
+	if got[0].Status.Type != "permission" {
+		t.Errorf("Status.Type = %q, want %q", got[0].Status.Type, "permission")
 	}
 }
 

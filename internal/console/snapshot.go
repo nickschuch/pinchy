@@ -39,17 +39,26 @@ type SessionModel struct {
 	ProviderID string `json:"providerID"`
 }
 
-// SessionStatus represents the live running state of an opencode session as
-// returned by GET /session/status on the agent's opencode server.
+// SessionStatus represents the live running state of an opencode session.
 //
 // The Type field is one of:
-//   - "idle"  — the session is waiting for user input
-//   - "busy"  — the agent is actively processing / running tools
-//   - "retry" — the agent hit an error and is retrying
+//   - "idle"       — the session is quiet; the last message was from the user
+//                    (or there are no messages yet)
+//   - "busy"       — the agent is actively processing / running tools
+//   - "retry"      — the agent hit an error and is retrying
+//   - "question"   — synthetic: the session is idle but the agent sent the last
+//                    message, meaning it is waiting for the user to reply
+//   - "permission" — synthetic: the session is idle, the agent sent the last
+//                    message, and that message contains a tool call that is
+//                    blocked pending user approval
+//
+// "idle", "busy", and "retry" come directly from GET /session/status.
+// "question" and "permission" are derived by the poller from the last message
+// in GET /session/:id/message?limit=1 when the raw status is "idle".
 //
 // For "retry", Attempt, Message, and Next are populated.
 type SessionStatus struct {
-	// Type is the discriminant: "idle", "busy", or "retry".
+	// Type is the discriminant: "idle", "busy", "retry", "question", or "permission".
 	Type string `json:"type"`
 	// Attempt is the retry attempt number (only set when Type == "retry").
 	Attempt int `json:"attempt,omitempty"`

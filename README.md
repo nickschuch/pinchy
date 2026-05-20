@@ -62,22 +62,21 @@ Both the agent and dind containers are also on a private per-environment bridge
 
 - Linux with Docker (rootless recommended; rootful works)
 - Go toolchain matching `go.mod` (managed via `mise` — see `mise.toml`)
-- `make`
 
 ### Build
 
 ```
-make build       # produces ./bin/pinchy
-make images      # build agent, docker, proxy, and console images locally
+mise run build       # produces ./bin/pinchy
+mise run images      # build agent, docker, proxy, and console images locally
 ```
 
 Run `./bin/pinchy` directly, or alias it for convenience (e.g.
 `alias pinchy="$PWD/bin/pinchy"`). A proper install path will come later.
 
-Override image references at build time or via environment variables:
+Override image references via environment variables:
 
 ```
-AGENT_IMAGE=myregistry/my-agent:dev make images
+AGENT_IMAGE=myregistry/my-agent:dev mise run images
 ```
 
 ### Create an environment
@@ -387,7 +386,7 @@ examples/           sample workloads
 ### Tests
 
 ```
-make test
+mise run test
 ```
 
 ### Image override

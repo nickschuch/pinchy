@@ -102,9 +102,11 @@
     .badge-unknown   { background: rgba(136,136,136,0.12);color: var(--muted); }
 
     /* Session-level status badges */
-    .badge-idle  { background: rgba(136,136,136,0.12); color: var(--muted); }
-    .badge-busy  { background: rgba(76,175,110,0.15);  color: var(--good); }
-    .badge-retry { background: rgba(224,160,48,0.15);  color: var(--warn); }
+    .badge-idle       { background: rgba(136,136,136,0.12); color: var(--muted); }
+    .badge-busy       { background: rgba(76,175,110,0.15);  color: var(--good); }
+    .badge-retry      { background: rgba(224,160,48,0.15);  color: var(--warn); }
+    .badge-question   { background: rgba(100,160,255,0.15); color: #64a0ff; }
+    .badge-permission { background: rgba(160,100,255,0.15); color: #a064ff; }
 
     table {
       width: 100%;
@@ -228,6 +230,10 @@
             <span class="badge badge-busy">running</span>
             {{else if eq .Status.Type "retry"}}
             <span class="badge badge-retry" title="{{.Status.Message}} (attempt {{.Status.Attempt}})">retrying</span>
+            {{else if eq .Status.Type "question"}}
+            <span class="badge badge-question">needs input</span>
+            {{else if eq .Status.Type "permission"}}
+            <span class="badge badge-permission">needs approval</span>
             {{else}}
             <span class="badge badge-idle">waiting</span>
             {{end}}
