@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/nickschuch/pinchy/internal/config"
 	"github.com/nickschuch/pinchy/internal/dockerx"
 	pinchyenv "github.com/nickschuch/pinchy/internal/env"
 )
@@ -14,6 +15,10 @@ func newStartCmd() *cobra.Command {
 	var (
 		healthTimeout time.Duration
 		proxyImage    string
+		consoleImage  string
+		llmproxyImage string
+		configPath    string
+		noBrowser     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "start <name>",
@@ -34,8 +39,15 @@ func newStartCmd() *cobra.Command {
 				return err
 			}
 
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+
 			proxyRef := resolveImage(proxyImage, "PINCHY_PROXY_IMAGE", DefaultProxyImage)
-			if err := ensureSharedInfra(ctx, cli, proxyRef, Version, healthTimeout); err != nil {
+			consoleRef := resolveImage(consoleImage, "PINCHY_CONSOLE_IMAGE", DefaultConsoleImage)
+			llmproxyRef := resolveImage(llmproxyImage, "PINCHY_LLMPROXY_IMAGE", DefaultLLMProxyImage)
+			if err := ensureSharedInfra(ctx, cli, proxyRef, consoleRef, llmproxyRef, Version, healthTimeout, false, cfg.LLMProxy); err != nil {
 				return err
 			}
 
@@ -52,29 +64,51 @@ func newStartCmd() *cobra.Command {
 			if err := dockerx.StartContainer(ctx, cli, pinchyenv.AgentContainerName(name)); err != nil {
 				return err
 			}
-			// Re-attach both containers to the shared network in case they were
-			// disconnected (e.g. after a manual network prune).
-			e, _, _ := dockerx.ResolveEnv(ctx, cli, name)
-			if e.AgentContainerID != "" {
-				if err := dockerx.ConnectToSharedNetwork(ctx, cli, e.AgentContainerID); err != nil {
-					return fmt.Errorf("connecting agent to shared network: %w", err)
-				}
+		// Re-attach both containers to the shared network in case they were
+		// disconnected (e.g. after a manual network prune).
+		e, _, _ := dockerx.ResolveEnv(ctx, cli, name)
+		if e.AgentContainerID != "" {
+			if err := dockerx.ConnectToSharedNetwork(ctx, cli, e.AgentContainerID); err != nil {
+				return fmt.Errorf("connecting agent to shared network: %w", err)
 			}
-			if e.DockerContainerID != "" {
-				if err := dockerx.ConnectToSharedNetwork(ctx, cli, e.DockerContainerID); err != nil {
-					return fmt.Errorf("connecting docker daemon to shared network: %w", err)
-				}
-				// Warn if the dind container pre-dates the dual-backend routing
-				// labels; failover will not work until the environment is recreated.
-				if !dockerx.HasTraefikLabels(cmd.Context(), cli, e.DockerContainerID) {
-					fmt.Fprintf(cmd.OutOrStdout(), "note: this environment lacks dind routing labels; recreate with 'pinchy rm %s && pinchy create %s' for failover routing\n", name, name)
-				}
+		}
+		if e.DockerContainerID != "" {
+			if err := dockerx.ConnectToSharedNetwork(ctx, cli, e.DockerContainerID); err != nil {
+				return fmt.Errorf("connecting docker daemon to shared network: %w", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Environment %q started.\n", name)
-			return nil
+			// Warn if the dind container pre-dates the dual-backend routing
+			// labels; failover will not work until the environment is recreated.
+			if !dockerx.HasTraefikLabels(cmd.Context(), cli, e.DockerContainerID) {
+				fmt.Fprintf(cmd.OutOrStdout(), "note: this environment lacks dind routing labels; recreate with 'pinchy rm %s && pinchy create %s' for failover routing\n", name, name)
+			}
+		}
+
+		// Wait for the opencode web server to be ready before returning so
+		// that a subsequent 'pinchy session <name>' does not race.
+		fmt.Fprintf(cmd.OutOrStdout(), "Waiting for agent to become ready (timeout %s)...\n", healthTimeout)
+		agentWaitCtx, agentCancel := waitContext(ctx, healthTimeout)
+		defer agentCancel()
+		if err := dockerx.WaitForAgentReady(agentWaitCtx, cli, pinchyenv.AgentContainerName(name), 2*time.Second,
+			func(f string, a ...any) { fmt.Fprintf(cmd.OutOrStdout(), f, a...) },
+		); err != nil {
+			return fmt.Errorf("agent never became ready: %w", err)
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Environment %q started.\n", name)
+		printWebURL(cmd.OutOrStdout(), name)
+		if !noBrowser {
+			if err := openInBrowser(ctx, envWebURL(name)); err != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Warning: could not open browser: %v\n", err)
+			}
+		}
+		return nil
 		},
 	}
 	cmd.Flags().DurationVar(&healthTimeout, "health-timeout", 2*time.Minute, "max time to wait for the docker daemon to become healthy")
 	cmd.Flags().StringVar(&proxyImage, "proxy-image", "", "override the proxy image reference")
+	cmd.Flags().StringVar(&consoleImage, "console-image", "", "override the console image reference")
+	cmd.Flags().StringVar(&llmproxyImage, "llmproxy-image", "", "override the llmproxy image reference")
+	cmd.Flags().StringVar(&configPath, "config", "", "path to pinchy config file (overrides $PINCHY_CONFIG and XDG default)")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the OpenCode web UI URL but do not open a browser")
 	return cmd
 }

@@ -39,6 +39,13 @@ type Environment struct {
 	// DockerHealth is one of "healthy", "unhealthy", "starting", or "" (no
 	// healthcheck reported).
 	DockerHealth string
+	// WorktreeRepo is the absolute host path of the source git repository from
+	// which a worktree was created for this environment. Empty when the
+	// environment uses a plain bind-mount (no worktree).
+	WorktreeRepo string
+	// WorktreeBranch is the git branch name for the worktree. Empty when
+	// WorktreeRepo is empty.
+	WorktreeBranch string
 	// AgentContainerID is the full Docker container ID (for direct API calls).
 	AgentContainerID string
 	// DockerContainerID is the full Docker container ID for the daemon.

@@ -28,7 +28,8 @@ func NewRoot(version string) *cobra.Command {
 		newInitCmd(),
 		newCreateCmd(),
 		newLsCmd(),
-		newSessionCmd(),
+		newOpenCmd(),
+		newSessionCmd(), // deprecated alias for newOpenCmd
 		newShellCmd(),
 		newExecCmd(),
 		newLogsCmd(),
@@ -37,6 +38,8 @@ func NewRoot(version string) *cobra.Command {
 		newStopCmd(),
 		newRestartCmd(),
 		newProxyCmd(),
+		newConsoleCmd(),
+		newLLMProxyCmd(),
 		newVersionCmd(),
 	)
 	return root

@@ -11,7 +11,8 @@ RUN apk add git \
             ncurses-terminfo-base \
             musl-locales \
             libstdc++ \
-            libgcc
+            libgcc \
+            gcompat 
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
@@ -37,6 +38,15 @@ RUN mkdir -p /home/skpr/.local/bin && \
 
 USER skpr
 
+# Pre-wire the agent to authenticate against the shared pinchy-llmproxy
+# container. This token is intentionally non-secret — it only authorises calls
+# to the local LLM proxy on the pinchy-shared bridge network, never directly
+# to Anthropic. The real ANTHROPIC_API_KEY lives only inside pinchy-llmproxy,
+# sourced from the host config at container start time.
+# MUST match: internal/env/llmproxy.go LLMProxyToken
+#             images/llmproxy/config.yaml general_settings.master_key
+ENV ANTHROPIC_API_KEY=sk-pinchy-llmproxy-shared
+
 RUN curl -fsSL https://opencode.ai/install | bash
 ADD opencode.json /home/skpr/.opencode/opencode.json
 ADD environment.md /home/skpr/.opencode/environment.md
@@ -45,9 +55,13 @@ ENV PATH=$PATH:/home/skpr/.local/bin:/home/skpr/.opencode/bin
 
 WORKDIR /data
 
+# Health endpoint is /global/health on port 4096 (must match the path used in
+# internal/env/labels.go ProxyTraefikLabelsAgent so Traefik and pinchy agree).
+# --retries=60 × --interval=2s ≈ 2 min, matching --health-timeout default.
+HEALTHCHECK --interval=2s --timeout=2s --start-period=5s --retries=60 \
+    CMD curl -fsS http://localhost:4096/global/health || exit 1
+
 # Run the opencode web server as PID 1. The web UI is reachable at
-# http://<env>.pinchy.localhost:4096/ via the pinchy proxy. Attach a TUI with:
-#   pinchy session <env>
-# or directly with:
-#   docker exec -it pinchy-<env>-agent opencode attach http://localhost:4096
+# http://<env>.pinchy.localhost:4096/ via the pinchy proxy:
+#   pinchy open <env>
 ENTRYPOINT ["opencode", "web", "--hostname", "0.0.0.0", "--port", "4096"]

@@ -13,15 +13,19 @@ import (
 	"github.com/nickschuch/pinchy/internal/config"
 	"github.com/nickschuch/pinchy/internal/dockerx"
 	pinchyenv "github.com/nickschuch/pinchy/internal/env"
+	"github.com/nickschuch/pinchy/internal/gitx"
 )
 
 func newCreateCmd() *cobra.Command {
 	var (
 		workdir       string
-		noAttach      bool
+		noWorktree    bool
+		noBrowser     bool
 		agentImage    string
 		dockerImage   string
 		proxyImage    string
+		consoleImage  string
+		llmproxyImage string
 		healthTimeout time.Duration
 		configPath    string
 		envFlags      []string
@@ -33,7 +37,32 @@ func newCreateCmd() *cobra.Command {
 		Long: `Create and start a new pinchy environment with the given name.
 
 The current directory is bind-mounted into the agent at /data unless
---workdir is supplied. By default, opens an opencode TUI session on success.
+--workdir is supplied. On success the OpenCode web UI URL is printed and
+opened in your default browser (pass --no-browser to skip the browser open).
+
+Git worktree support (automatic):
+
+  When --workdir (or the current directory) is inside a git repository,
+  pinchy automatically creates a new git worktree at:
+
+    <repo>/.pinchy-worktrees/<name>/
+
+  on a new branch also named <name> (branched from the current HEAD). That
+  worktree directory is then bind-mounted into the agent at /data instead of
+  the source repository. This gives each environment its own isolated branch
+  while sharing the repo's git history and objects.
+
+  Requirements:
+    - git must be on your PATH
+    - a branch named <name> must not already exist in the repo
+
+  Pass --no-worktree to skip this behaviour and use a plain bind-mount.
+
+  On 'pinchy rm', the worktree directory and branch are removed automatically.
+  Use 'pinchy rm --keep-worktree' to preserve them.
+
+  NOTE: .pinchy-worktrees/ will appear as an untracked directory in git
+  status. Add it to .gitignore or .git/info/exclude to suppress the noise.
 
 Environment variables are injected into the agent container using the
 following precedence (later sources win for the same key):
@@ -74,9 +103,17 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 				return fmt.Errorf("environment %q already exists (agent: %s)", name, existing.AgentStatus)
 			}
 
+			// Load config early so we can pass LLMProxy config to ensureSharedInfra.
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+
 			agentRef := resolveImage(agentImage, "PINCHY_AGENT_IMAGE", DefaultAgentImage)
 			dockerRef := resolveImage(dockerImage, "PINCHY_DOCKER_IMAGE", DefaultDockerImage)
 			proxyRef := resolveImage(proxyImage, "PINCHY_PROXY_IMAGE", DefaultProxyImage)
+			consoleRef := resolveImage(consoleImage, "PINCHY_CONSOLE_IMAGE", DefaultConsoleImage)
+			llmproxyRef := resolveImage(llmproxyImage, "PINCHY_LLMPROXY_IMAGE", DefaultLLMProxyImage)
 
 			if err := dockerx.EnsureImageLocal(ctx, cli, agentRef); err != nil {
 				return err
@@ -87,7 +124,7 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 
 			// Ensure the shared proxy infrastructure is up before creating the env.
 			fmt.Fprintf(cmd.OutOrStdout(), "Ensuring shared proxy infrastructure...\n")
-			if err := ensureSharedInfra(ctx, cli, proxyRef, Version, healthTimeout); err != nil {
+			if err := ensureSharedInfra(ctx, cli, proxyRef, consoleRef, llmproxyRef, Version, healthTimeout, false, cfg.LLMProxy); err != nil {
 				return err
 			}
 
@@ -100,6 +137,29 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 			} else if !fi.IsDir() {
 				return fmt.Errorf("workdir %q is not a directory", absWorkdir)
 			}
+
+			// Git worktree auto-detect: if --workdir resolves inside a git
+			// repo and --no-worktree is not set, create a dedicated worktree
+			// for this environment and use it as the bind-mount path.
+			var worktreeRepo, worktreeBranch string
+			if !noWorktree {
+				absWorkdir, worktreeRepo, worktreeBranch, err = maybeCreateWorktree(
+					cmd, absWorkdir, name,
+				)
+				if err != nil {
+					return err
+				}
+			}
+
+			// If a worktree was created and something fails later, clean it up.
+			worktreeCreated := worktreeRepo != ""
+			defer func() {
+				if worktreeCreated {
+					worktreePath := gitx.WorktreePath(worktreeRepo, name)
+					_ = gitx.RemoveWorktree(worktreeRepo, worktreePath)
+					_ = gitx.DeleteBranch(worktreeRepo, worktreeBranch)
+				}
+			}()
 
 			// Build the injected env map using the defined precedence.
 			injectedEnv, err := buildEnvMap(name, configPath, envFiles, envFlags)
@@ -167,6 +227,10 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 			// Agent container.
 			agentLabels := pinchyenv.BaseLabels(name, pinchyenv.RoleAgent, Version, created)
 			agentLabels[pinchyenv.LabelWorkdir] = absWorkdir
+			if worktreeRepo != "" {
+				agentLabels[pinchyenv.LabelWorktreeRepo] = worktreeRepo
+				agentLabels[pinchyenv.LabelWorktreeBranch] = worktreeBranch
+			}
 			// Merge Traefik routing labels so the proxy auto-discovers this agent.
 			// The agent declares routers, services, and active healthchecks;
 			// the dind container (above) contributes a second server per service.
@@ -186,31 +250,50 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 			if err != nil {
 				return err
 			}
-			// Connect the agent to the shared network so Traefik can reach it.
-			if err := dockerx.ConnectToSharedNetwork(ctx, cli, agentID); err != nil {
-				return fmt.Errorf("connecting agent to shared network: %w", err)
-			}
+		// Connect the agent to the shared network so Traefik can reach it.
+		if err := dockerx.ConnectToSharedNetwork(ctx, cli, agentID); err != nil {
+			return fmt.Errorf("connecting agent to shared network: %w", err)
+		}
 
-			fmt.Fprintf(cmd.OutOrStdout(), "Environment %q is ready.\n", name)
-			if noAttach {
-				return nil
+		// Wait for the opencode web server inside the agent to become ready
+		// before printing the URL and opening the browser.
+		fmt.Fprintf(cmd.OutOrStdout(), "Waiting for agent to become ready (timeout %s)...\n", healthTimeout)
+		agentWaitCtx, agentCancel := waitContext(ctx, healthTimeout)
+		defer agentCancel()
+		if err := dockerx.WaitForAgentReady(agentWaitCtx, cli, pinchyenv.AgentContainerName(name), 2*time.Second,
+			func(f string, a ...any) { fmt.Fprintf(cmd.OutOrStdout(), f, a...) },
+		); err != nil {
+			return fmt.Errorf("agent never became ready: %w", err)
+		}
+
+		// Environment is fully created — disarm the worktree rollback.
+		worktreeCreated = false
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Environment %q is ready.\n", name)
+		printWebURL(cmd.OutOrStdout(), name)
+		if !noBrowser {
+			if err := openInBrowser(ctx, envWebURL(name)); err != nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "Warning: could not open browser: %v\n", err)
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Attaching TUI — detach with Ctrl-c or Ctrl-d.\n")
-			return runDockerExecTTYEnv(ctx, pinchyenv.AgentContainerName(name),
-				[]string{"XDG_DATA_HOME=/tmp/opencode-tui"},
-				[]string{"opencode", "attach", "http://localhost:4096"},
-			)
+		}
+		return nil
 		},
 	}
 	cmd.Flags().StringVar(&workdir, "workdir", "", "host directory to bind-mount at /data (defaults to $PWD)")
-	cmd.Flags().BoolVar(&noAttach, "no-attach", false, "do not attach to the agent after creation")
+	cmd.Flags().BoolVar(&noWorktree, "no-worktree", false, "disable automatic git worktree creation when --workdir is inside a git repo")
+	cmd.Flags().BoolVar(&noBrowser, "no-browser", false, "print the OpenCode web UI URL but do not open a browser")
+	// --no-attach is a hidden deprecated alias for --no-browser.
+	cmd.Flags().BoolVar(&noBrowser, "no-attach", false, "deprecated: use --no-browser")
+	_ = cmd.Flags().MarkHidden("no-attach")
 	cmd.Flags().StringVar(&agentImage, "agent-image", "", "override the agent image reference")
 	cmd.Flags().StringVar(&dockerImage, "docker-image", "", "override the docker image reference")
 	cmd.Flags().StringVar(&proxyImage, "proxy-image", "", "override the proxy image reference")
+	cmd.Flags().StringVar(&consoleImage, "console-image", "", "override the console image reference")
 	cmd.Flags().DurationVar(&healthTimeout, "health-timeout", 2*time.Minute, "max time to wait for the docker daemon to become healthy")
 	cmd.Flags().StringVar(&configPath, "config", "", "path to pinchy config file (overrides $PINCHY_CONFIG and XDG default)")
 	cmd.Flags().StringArrayVarP(&envFlags, "env", "e", nil, "inject environment variable into the agent (KEY=VALUE); repeatable; takes precedence over config file")
 	cmd.Flags().StringArrayVar(&envFiles, "env-file", nil, "file of KEY=VALUE pairs to inject into the agent; repeatable; takes precedence over config file")
+	cmd.Flags().StringVar(&llmproxyImage, "llmproxy-image", "", "override the llmproxy image reference")
 	return cmd
 }
 
@@ -290,6 +373,61 @@ func parseEnvFile(path string) (map[string]string, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// maybeCreateWorktree checks whether absWorkdir is inside a git repository
+// and, if so, creates a new worktree at <repo>/.pinchy-worktrees/<envName> on
+// a new branch named envName. It returns the (possibly unchanged) bind-mount
+// path along with the repo root and branch name (both empty when no worktree
+// was created).
+//
+// If git is not found on PATH the function silently falls back to a plain
+// bind-mount (returns absWorkdir unchanged).
+func maybeCreateWorktree(cmd *cobra.Command, absWorkdir, envName string) (bindPath, repoRoot, branch string, err error) {
+	repoRoot, found, findErr := gitx.FindRepoRoot(absWorkdir)
+	if findErr != nil {
+		if findErr == gitx.ErrNoGit {
+			// git not installed — fall back gracefully.
+			fmt.Fprintf(cmd.OutOrStdout(), "Warning: git not found in PATH; skipping worktree creation.\n")
+			return absWorkdir, "", "", nil
+		}
+		return "", "", "", fmt.Errorf("detecting git repository: %w", findErr)
+	}
+	if !found {
+		// Not inside a git repo — plain bind-mount.
+		return absWorkdir, "", "", nil
+	}
+
+	// Check the branch doesn't already exist.
+	exists, err := gitx.BranchExists(repoRoot, envName)
+	if err != nil {
+		return "", "", "", fmt.Errorf("checking git branch: %w", err)
+	}
+	if exists {
+		return "", "", "", fmt.Errorf(
+			"git branch %q already exists in %s\n"+
+				"Hint: delete it with 'git branch -D %s' or choose a different environment name.",
+			envName, repoRoot, envName,
+		)
+	}
+
+	worktreePath := gitx.WorktreePath(repoRoot, envName)
+
+	// Refuse if the target directory already exists (stale leftover).
+	if _, statErr := os.Stat(worktreePath); statErr == nil {
+		return "", "", "", fmt.Errorf(
+			"worktree directory %q already exists\n"+
+				"Hint: remove it manually and run 'git worktree prune' in %s.",
+			worktreePath, repoRoot,
+		)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Creating git worktree at %s (branch: %s)...\n", worktreePath, envName)
+	if err := gitx.AddWorktree(repoRoot, worktreePath, envName); err != nil {
+		return "", "", "", fmt.Errorf("creating git worktree: %w", err)
+	}
+
+	return worktreePath, repoRoot, envName, nil
 }
 
 // sortedKeys returns the keys of m sorted alphabetically.

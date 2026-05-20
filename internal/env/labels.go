@@ -18,6 +18,15 @@ const (
 	// LabelWorkdir is the absolute host path bind-mounted into the agent
 	// container at /data. Set on the agent container only.
 	LabelWorkdir = "pinchy.workdir"
+	// LabelWorktreeRepo is the absolute host path of the source git repository
+	// from which a worktree was created. Set on the agent container only when
+	// the environment was created via automatic git worktree support. Empty
+	// when the environment uses a plain bind-mount.
+	LabelWorktreeRepo = "pinchy.worktree.repo"
+	// LabelWorktreeBranch is the name of the git branch that was created for
+	// the worktree. Set on the agent container only when LabelWorktreeRepo is
+	// also set.
+	LabelWorktreeBranch = "pinchy.worktree.branch"
 	// LabelCreated is an RFC3339 timestamp recording when pinchy created the
 	// resource.
 	LabelCreated = "pinchy.created"
@@ -30,8 +39,17 @@ const (
 	RoleAgent         = "agent"
 	RoleDocker        = "docker"
 	RoleProxy         = "proxy"
+	RoleConsole       = "console"
+	RoleLLMProxy      = "llmproxy"
 	RoleSharedNetwork = "shared-network"
 )
+
+// LabelLLMProxyKeyHash holds a short sha256 prefix of the real Anthropic API
+// key. It is used solely for change detection: when the user rotates the key
+// and re-runs `pinchy init`, EnsureLLMProxy sees a hash mismatch, removes the
+// old container, and starts a fresh one with the updated env var. The full key
+// is never written to any label.
+const LabelLLMProxyKeyHash = "pinchy.llmproxy.keyhash"
 
 // ManagedTrue is the canonical value for LabelManaged.
 const ManagedTrue = "true"
@@ -125,6 +143,57 @@ func ProxyTraefikLabelsAgent(envName string) map[string]string {
 		}
 	}
 	return labels
+}
+
+// ConsoleTraefikLabels returns the Traefik Docker-provider labels for the
+// console container. The console is a single global service (like the proxy)
+// reachable at http://console.pinchy.localhost:8080 via the p8080 entrypoint.
+// Its healthcheck probes /healthz on port 8080.
+func ConsoleTraefikLabels() map[string]string {
+	const (
+		rtr        = "console-p8080"
+		svc        = "console-p8080"
+		serverPort = "8080"
+		healthPath = "/healthz"
+	)
+	p := "traefik.http."
+	return map[string]string{
+		"traefik.enable":                                                        "true",
+		"traefik.docker.network":                                                SharedNetworkName,
+		p + "routers." + rtr + ".rule":                                          "Host(`console.pinchy.localhost`)",
+		p + "routers." + rtr + ".entrypoints":                                   "p8080",
+		p + "routers." + rtr + ".service":                                       svc,
+		p + "services." + svc + ".loadbalancer.server.port":                     serverPort,
+		p + "services." + svc + ".loadbalancer.healthcheck.path":                healthPath,
+		p + "services." + svc + ".loadbalancer.healthcheck.interval":            "5s",
+		p + "services." + svc + ".loadbalancer.healthcheck.timeout":             "2s",
+	}
+}
+
+// LLMProxyTraefikLabels returns the Traefik Docker-provider labels for the
+// LLM proxy container. The proxy admin UI is exposed as a single global service
+// reachable at http://llmproxy.pinchy.localhost:8080 via the p8080 entrypoint.
+// The healthcheck probes /health/liveliness on port 4000 (LiteLLM's standard
+// liveness endpoint).
+func LLMProxyTraefikLabels() map[string]string {
+	const (
+		rtr        = "llmproxy-p8080"
+		svc        = "llmproxy-p8080"
+		serverPort = "4000"
+		healthPath = "/health/liveliness"
+	)
+	p := "traefik.http."
+	return map[string]string{
+		"traefik.enable":                                             "true",
+		"traefik.docker.network":                                     SharedNetworkName,
+		p + "routers." + rtr + ".rule":                              "Host(`llmproxy.pinchy.localhost`)",
+		p + "routers." + rtr + ".entrypoints":                       "p8080",
+		p + "routers." + rtr + ".service":                           svc,
+		p + "services." + svc + ".loadbalancer.server.port":         serverPort,
+		p + "services." + svc + ".loadbalancer.healthcheck.path":    healthPath,
+		p + "services." + svc + ".loadbalancer.healthcheck.interval": "5s",
+		p + "services." + svc + ".loadbalancer.healthcheck.timeout":  "2s",
+	}
 }
 
 // ProxyTraefikLabelsDocker returns the Traefik Docker-provider labels to

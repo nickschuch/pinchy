@@ -1,0 +1,27 @@
+# LiteLLM configuration baked into the pinchy-llmproxy image.
+#
+# The model wildcard passes all model names through to the Anthropic API
+# unchanged, so opencode can request any claude-* model without this file
+# needing to enumerate them individually.
+#
+# IMPORTANT: general_settings.master_key MUST stay in sync with:
+#   internal/env/llmproxy.go  LLMProxyToken
+#   images/agent/Dockerfile   ENV ANTHROPIC_API_KEY
+#
+# The real ANTHROPIC_API_KEY is NOT stored here. It is read at container start
+# time from the ANTHROPIC_API_KEY environment variable, which pinchy injects
+# from the host config file (llm_proxy.anthropic_api_key).
+
+model_list:
+  - model_name: "*"
+    litellm_params:
+      model: "anthropic/*"
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+
+general_settings:
+  master_key: sk-pinchy-llmproxy-shared
+
+litellm_settings:
+  drop_params: false
+  set_verbose: false
+  telemetry: false

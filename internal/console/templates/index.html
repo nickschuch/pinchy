@@ -1,0 +1,245 @@
+{{define "index.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="15">
+  <title>Pinchy Console</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:      #0f0f10;
+      --surface: #1a1a1d;
+      --border:  #2a2a2e;
+      --accent:  #e05a3a;
+      --text:    #e8e6e3;
+      --muted:   #888;
+      --good:    #4caf6e;
+      --warn:    #e0a030;
+      --bad:     #e05a3a;
+      --radius:  6px;
+      --font:    'SF Mono', ui-monospace, 'Cascadia Code', Menlo, monospace;
+    }
+
+    body {
+      font-family: var(--font);
+      font-size: 13px;
+      background: var(--bg);
+      color: var(--text);
+      padding: 2rem;
+      line-height: 1.5;
+    }
+
+    header {
+      display: flex;
+      align-items: baseline;
+      gap: 1.5rem;
+      margin-bottom: 2rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 1rem;
+    }
+
+    header h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .meta { color: var(--muted); font-size: 0.85em; }
+
+    .envs { display: flex; flex-direction: column; gap: 1.5rem; }
+
+    .env-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .env-header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.75rem 1rem;
+      border-bottom: 1px solid var(--border);
+      background: rgba(255,255,255,0.02);
+    }
+
+    .env-name { font-weight: 700; font-size: 1rem; }
+
+    .env-link {
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 0.8em;
+    }
+    .env-link:hover { color: var(--accent); text-decoration: underline; }
+
+    .env-meta {
+      margin-left: auto;
+      display: flex;
+      gap: 1.5rem;
+      color: var(--muted);
+      font-size: 0.8em;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.1em 0.5em;
+      border-radius: 3px;
+      font-size: 0.78em;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .badge-running   { background: rgba(76,175,110,0.15); color: var(--good); }
+    .badge-starting  { background: rgba(224,160,48,0.15); color: var(--warn); }
+    .badge-stopped,
+    .badge-unhealthy { background: rgba(224,90,58,0.12);  color: var(--bad); }
+    .badge-paused,
+    .badge-unknown   { background: rgba(136,136,136,0.12);color: var(--muted); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th {
+      text-align: left;
+      padding: 0.5rem 1rem;
+      color: var(--muted);
+      font-size: 0.75em;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      border-bottom: 1px solid var(--border);
+      font-weight: 600;
+    }
+
+    td {
+      padding: 0.55rem 1rem;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      vertical-align: middle;
+    }
+
+    tr:last-child td { border-bottom: none; }
+    tr:hover td      { background: rgba(255,255,255,0.025); }
+
+    .td-title {
+      font-weight: 500;
+      max-width: 36rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .chip {
+      display: inline-block;
+      padding: 0.1em 0.45em;
+      border-radius: 3px;
+      font-size: 0.75em;
+      color: var(--muted);
+      background: rgba(255,255,255,0.06);
+      border: 1px solid var(--border);
+    }
+
+    .open-link {
+      display: inline-flex;
+      align-items: center;
+      color: var(--accent);
+      text-decoration: none;
+      font-size: 0.8em;
+      border: 1px solid rgba(224,90,58,0.35);
+      border-radius: 3px;
+      padding: 0.1em 0.45em;
+      white-space: nowrap;
+    }
+    .open-link:hover { background: rgba(224,90,58,0.12); }
+
+    .notice {
+      padding: 0.75rem 1rem;
+      color: var(--muted);
+      font-size: 0.85em;
+    }
+
+    .notice-warn { color: var(--warn); }
+
+    .empty-state {
+      text-align: center;
+      padding: 4rem 2rem;
+      color: var(--muted);
+    }
+    .empty-state h2 { font-size: 1rem; margin-bottom: 0.5rem; color: var(--text); }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Pinchy Console</h1>
+  {{if .LastUpdated.IsZero -}}
+  <span class="meta">collecting&hellip;</span>
+  {{- else -}}
+  <span class="meta">last updated {{formatTime .LastUpdated}} &bull; refreshes every 15s</span>
+  {{- end}}
+</header>
+
+{{if .Envs}}
+<div class="envs">
+  {{range .Envs}}{{$env := .}}
+  <div class="env-card">
+    <div class="env-header">
+      <span class="env-name">{{.Name}}</span>
+      <a class="env-link" href="http://{{.Name}}.pinchy.localhost:4096/" target="_blank" rel="noopener">&#8599;&nbsp;web&nbsp;console</a>
+      <span class="badge badge-{{.Status}}">{{.Status}}</span>
+      <div class="env-meta">
+        {{if .Workdir}}<span title="workdir">{{.Workdir}}{{if .WorktreeBranch}}&nbsp;<span class="chip" title="git worktree branch">&#9912;&nbsp;{{.WorktreeBranch}}</span>{{end}}</span>{{end}}
+        {{if not .Created.IsZero}}<span title="created">{{formatTime .Created}}</span>{{end}}
+      </div>
+    </div>
+
+    {{if .FetchError}}
+    <div class="notice notice-warn">&#9888;&nbsp;{{.FetchError}}</div>
+    {{else if .Sessions}}
+    <table>
+      <thead>
+        <tr>
+          <th>Session</th>
+          <th>Agent</th>
+          <th>Model</th>
+          <th>Updated</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Sessions}}
+        <tr>
+          <td class="td-title" title="{{.ID}}">
+            {{if .Title}}{{.Title}}{{else}}<span style="color:var(--muted)">untitled</span>{{end}}
+          </td>
+          <td><span class="chip">{{if .Agent}}{{.Agent}}{{else}}&mdash;{{end}}</span></td>
+          <td><span class="chip">{{if .Model.ID}}{{.Model.ID}}{{else}}&mdash;{{end}}</span></td>
+          <td class="meta">{{formatTime (.UpdatedTime)}}</td>
+          <td>
+            <a class="open-link" href="{{$env.WebConsoleURL .Directory .ID}}" target="_blank" rel="noopener">Open&nbsp;&#8599;</a>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+    {{else}}
+    <div class="notice">No opencode sessions yet.</div>
+    {{end}}
+  </div>
+  {{end}}
+</div>
+{{else}}
+<div class="empty-state">
+  <h2>No environments found</h2>
+  <p>Run <code>pinchy create &lt;name&gt;</code> to create one.</p>
+</div>
+{{end}}
+
+</body>
+</html>
+{{end}}

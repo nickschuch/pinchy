@@ -10,7 +10,7 @@ rootless Docker-in-Docker daemon. Environments are discovered via Docker labels
 ## What you get
 
 - An **agent container** running `opencode web` on port 4096 — accessible via
-  browser or TUI and reachable through the shared Traefik proxy at
+  browser and reachable through the shared Traefik proxy at
   `http://<env>.pinchy.localhost:4096/`.
 - A **private dind container** (rootless Docker-in-Docker) per environment,
   wired to the agent over a shared socket volume. Run `docker compose` inside
@@ -19,6 +19,11 @@ rootless Docker-in-Docker daemon. Environments are discovered via Docker labels
   to the right agent. Active healthchecks on each backend mean compose-based
   services (reachable via the dind container) and in-agent processes both work
   transparently.
+- A **discovery console** at `http://console.pinchy.localhost:8080` — a live
+  HTML dashboard that lists every pinchy environment, its opencode sessions, and
+  provides deep links into each session's web console. The dashboard auto-refreshes
+  every 15 seconds. No JavaScript framework; served from the same shared network
+  as the proxy.
 - Label-driven discovery — no database, no config files, no daemons beyond
   Docker itself.
 
@@ -26,25 +31,26 @@ rootless Docker-in-Docker daemon. Environments are discovered via Docker labels
 
 ```
   host
-  ──────────────────────────────────────────────────────
-  :8080  :4096  :3000          pinchy-proxy (Traefik)
-                 │
-                 │  Host(<env>.pinchy.localhost)
-                 ▼
-        ╔════════════════════╗
-        ║  pinchy-shared     ║  (bridge network)
-        ╚════════════════════╝
-               │          │
-               ▼          ▼
-    ┌──────────────┐  ┌──────────────┐
-    │  agent       │  │  docker      │
-    │              │  │  (dind-      │
-    │  opencode    │  │  rootless)   │
-    │  web :4096   │  │              │
-    └──────┬───────┘  └──────┬───────┘
-           │                 │
-           └────── sock ─────┘
-                  volume
+  ──────────────────────────────────────────────────────────────
+  :8080  :4096  :3000              pinchy-proxy (Traefik)
+   │                │
+   │  Host(console.pinchy.localhost)
+   │                │  Host(<env>.pinchy.localhost)
+   ▼                ▼
+  ╔════════════════════════════════╗
+  ║          pinchy-shared         ║  (bridge network)
+  ╚════════════════════════════════╝
+     │              │          │
+     ▼              ▼          ▼
+  ┌──────────┐  ┌──────────┐  ┌──────────────┐
+  │ console  │  │  agent   │  │  docker      │
+  │          │  │          │  │  (dind-      │
+  │ dashboard│  │ opencode │  │  rootless)   │
+  │ :8080    │  │ web :4096│  │              │
+  └──────────┘  └──────┬───┘  └──────┬───────┘
+                       │             │
+                       └──── sock ───┘
+                             volume
 ```
 
 Both the agent and dind containers are also on a private per-environment bridge
@@ -62,7 +68,7 @@ Both the agent and dind containers are also on a private per-environment bridge
 
 ```
 make build       # produces ./bin/pinchy
-make images      # build agent, docker, and proxy images locally
+make images      # build agent, docker, proxy, and console images locally
 ```
 
 Run `./bin/pinchy` directly, or alias it for convenience (e.g.
@@ -87,27 +93,26 @@ Pinchy will:
 2. Start a dind container and wait for it to become healthy.
 3. Start the agent container (opencode web on `0.0.0.0:4096`).
 4. Connect both containers to `pinchy-shared` so the proxy can route to them.
-5. Open a TUI session.
+5. Print the OpenCode web UI URL and open it in your default browser.
+
+Pass `--no-browser` to skip the browser open and just print the URL.
 
 ### Access it
 
 | Method | Address |
 |--------|---------|
 | Browser | `http://example.pinchy.localhost:4096/` |
-| TUI (resume last session) | `pinchy session example` |
-| TUI (fresh session) | `pinchy session example --new` |
+| Open web UI | `pinchy open example` |
 | Shell | `pinchy shell example` |
-
-To detach from the TUI, press **Ctrl-c**.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `pinchy init` | Initialise shared proxy infrastructure |
+| `pinchy init` | Initialise shared proxy infrastructure (proxy + console) |
 | `pinchy create <name>` | Create and start a new environment |
-| `pinchy ls` | List environments and proxy status |
-| `pinchy session <name>` | Open an opencode TUI session in the agent |
+| `pinchy ls` | List environments, proxy, and console status |
+| `pinchy open <name>` | Print and open the OpenCode web UI for an environment |
 | `pinchy shell <name>` | Open an interactive shell in a service container |
 | `pinchy exec <name> -- <cmd>` | Run a one-off command in a service container |
 | `pinchy logs <name>` | Stream logs from every container in an environment |
@@ -116,9 +121,57 @@ To detach from the TUI, press **Ctrl-c**.
 | `pinchy restart <name>` | Stop and start an environment |
 | `pinchy rm <name>` | Remove an environment and its volumes |
 | `pinchy proxy logs` | Fetch logs from the shared proxy container |
+| `pinchy console logs` | Fetch logs from the shared console container |
+| `pinchy llmproxy logs` | Fetch logs from the shared LLM proxy container |
 | `pinchy version` | Print the pinchy version |
 
 Run `pinchy <command> --help` for flags and full descriptions.
+
+## Git worktrees
+
+When you run `pinchy create <name>` from inside a git repository (or with
+`--workdir` pointing into one), pinchy automatically creates a dedicated git
+worktree for the environment:
+
+```
+<repo>/.pinchy-worktrees/<name>/
+```
+
+on a new branch also named `<name>` (branched from the current `HEAD`). That
+worktree directory is then bind-mounted into the agent at `/data`, giving each
+environment its own isolated branch while sharing the repository's history and
+object store.
+
+### Requirements
+
+- `git` must be on your `PATH`
+- a local branch named `<name>` must not already exist in the repository
+
+### Opt out
+
+Pass `--no-worktree` to use a plain bind-mount instead:
+
+```
+pinchy create example --no-worktree
+```
+
+### Cleanup
+
+`pinchy rm` removes the worktree directory and deletes the branch by default.
+Pass `--keep-worktree` to preserve both (e.g. to review or push the branch):
+
+```
+pinchy rm example --keep-worktree
+```
+
+### Gitignore note
+
+The `.pinchy-worktrees/` directory will appear as untracked in `git status`.
+Add it to `.gitignore` or `.git/info/exclude` to suppress the noise:
+
+```
+echo '/.pinchy-worktrees/' >> .git/info/exclude
+```
 
 ## Configuration
 
@@ -136,13 +189,19 @@ A missing file is not an error.
 ```yaml
 # Variables injected into every agent container.
 env:
-  ANTHROPIC_API_KEY: sk-ant-...
+  GITHUB_TOKEN: ghp_...
 
 # Per-environment overrides (merged on top of the global env block).
 environments:
   example:
     env:
       SOME_VAR: override-value
+
+# LLM proxy (optional). When set, pinchy starts a shared LiteLLM container
+# (pinchy-llmproxy) that holds the real Anthropic key. Agents are pre-wired
+# to use it — they never receive the real key.
+llm_proxy:
+  anthropic_api_key: sk-ant-...
 ```
 
 ### Env injection precedence
@@ -176,11 +235,13 @@ Each environment consists of two containers:
 | `pinchy-<env>-agent` | `ghcr.io/nickschuch/pinchy-agent` | opencode web server + tooling |
 | `pinchy-<env>-docker` | `ghcr.io/nickschuch/pinchy-docker` | rootless dind daemon |
 
-Plus one global shared service:
+Plus three global shared services:
 
 | Container | Image | Role |
 |-----------|-------|------|
 | `pinchy-proxy` | `ghcr.io/nickschuch/pinchy-proxy` | Traefik reverse proxy |
+| `pinchy-console` | `ghcr.io/nickschuch/pinchy-console` | Discovery dashboard at `http://console.pinchy.localhost:8080` |
+| `pinchy-llmproxy` | `ghcr.io/nickschuch/pinchy-llmproxy` | LiteLLM Anthropic proxy (when `llm_proxy` is configured); admin UI at `http://llmproxy.pinchy.localhost:8080` |
 
 ### Routing
 
@@ -235,12 +296,16 @@ See `examples/http-server/AGENTS.md` for agent-specific context and conventions.
 ```
 cmd/pinchy/         binary entrypoint
 internal/cli/       cobra command implementations
-internal/dockerx/   Docker SDK helpers (container, network, volume, proxy)
+internal/console/   discovery dashboard server, poller, snapshot, HTML template
+internal/dockerx/   Docker SDK helpers (container, network, volume, proxy, console)
 internal/env/       label constants, name helpers, environment model
 internal/config/    config file loading and validation
+internal/gitx/      git worktree helpers (host-side git operations)
 internal/table/     table rendering helper
 images/agent/       agent Dockerfile (opencode + dev tooling)
+images/console/     console Dockerfile (pinchy binary, serves dashboard)
 images/docker/      dind-rootless Dockerfile
+images/llmproxy/    LiteLLM-based Anthropic proxy Dockerfile
 images/proxy/       Traefik Dockerfile
 examples/           sample workloads
 ```
@@ -253,10 +318,103 @@ make test
 
 ### Image override
 
-All three image references can be overridden at runtime:
+All image references can be overridden at runtime:
 
 ```
 PINCHY_AGENT_IMAGE=myregistry/agent:dev pinchy create example
 PINCHY_DOCKER_IMAGE=myregistry/docker:dev pinchy create example
 PINCHY_PROXY_IMAGE=myregistry/proxy:dev pinchy create example
+PINCHY_CONSOLE_IMAGE=myregistry/console:dev pinchy init
+PINCHY_LLMPROXY_IMAGE=myregistry/llmproxy:dev pinchy init
 ```
+
+### LLM proxy (Anthropic)
+
+Pinchy can run a shared [LiteLLM](https://github.com/BerriAI/litellm)-based
+proxy so the real `ANTHROPIC_API_KEY` never reaches any agent container.
+
+**How it works**
+
+```
+agent (opencode)
+  ANTHROPIC_API_KEY=sk-pinchy-llmproxy-shared   ← non-secret, baked into image
+  baseURL=http://pinchy-llmproxy:4000/anthropic/v1
+        │
+        ▼
+pinchy-llmproxy (LiteLLM, internal to pinchy-shared bridge)
+        │  real sk-ant-… key injected at container start
+        ▼
+api.anthropic.com
+```
+
+The hardcoded shared token (`sk-pinchy-llmproxy-shared`) grants access only
+to the local proxy on the `pinchy-shared` bridge — never directly to Anthropic.
+
+**Setup**
+
+Add to `~/.config/pinchy/config.yaml`:
+
+```yaml
+llm_proxy:
+  anthropic_api_key: sk-ant-...
+```
+
+Then run:
+
+```
+pinchy init
+```
+
+The proxy starts automatically. All new environments will use it.
+
+**Admin UI**
+
+The LiteLLM admin UI (request logs, spend, config) is exposed at:
+
+```
+http://llmproxy.pinchy.localhost:8080
+```
+
+Log in with the master key `sk-pinchy-llmproxy-shared`. The UI is reachable
+only via the host's `.pinchy.localhost` resolution — it is not published on any
+external interface.
+
+**Rotating the Anthropic key**
+
+Update `llm_proxy.anthropic_api_key` in the config file and re-run
+`pinchy init`. Pinchy detects the key change (via a label hash), removes the
+old container, and starts a fresh one. Running agent containers need no restart
+because they never held the real key.
+
+**Bypassing the proxy per-project**
+
+To use a different Anthropic key for a specific project, override both in the
+agent at create time:
+
+```
+pinchy create myenv -e ANTHROPIC_API_KEY=sk-ant-direct
+```
+
+Then add to your project's `opencode.json`:
+
+```json
+{
+  "provider": {
+    "anthropic": {
+      "options": {
+        "baseURL": "https://api.anthropic.com/v1"
+      }
+    }
+  }
+}
+```
+
+**Reserved names**
+
+`llmproxy` is a reserved environment name (alongside `proxy` and `console`)
+and cannot be used as a `pinchy create` argument.
+
+**Troubleshooting**
+
+If Anthropic calls fail with DNS or connection errors, the `pinchy-llmproxy`
+container is not running. Check `pinchy ls` and `pinchy llmproxy logs`.

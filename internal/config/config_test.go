@@ -265,6 +265,70 @@ func TestEnvFor_EmptyConfig(t *testing.T) {
 }
 
 // --------------------------------------------------------------------------
+// LLMProxy
+// --------------------------------------------------------------------------
+
+func TestLoad_LLMProxyConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+llm_proxy:
+  anthropic_api_key: sk-ant-real-key
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMProxy == nil {
+		t.Fatal("expected LLMProxy to be non-nil")
+	}
+	if cfg.LLMProxy.AnthropicAPIKey != "sk-ant-real-key" {
+		t.Errorf("AnthropicAPIKey = %q, want sk-ant-real-key", cfg.LLMProxy.AnthropicAPIKey)
+	}
+}
+
+func TestLoad_LLMProxyEnabled(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+llm_proxy:
+  anthropic_api_key: sk-ant-real-key
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cfg.LLMProxyEnabled() {
+		t.Error("LLMProxyEnabled() = false, want true")
+	}
+}
+
+func TestLoad_LLMProxyNotEnabled_NilBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `env:
+  FOO: bar
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.LLMProxyEnabled() {
+		t.Error("LLMProxyEnabled() = true, want false for config with no llm_proxy block")
+	}
+}
+
+func TestLoad_LLMProxyEmptyKey_Error(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+llm_proxy:
+  anthropic_api_key: ""
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for empty anthropic_api_key, got nil")
+	}
+}
+
+// --------------------------------------------------------------------------
 // validateKey
 // --------------------------------------------------------------------------
 

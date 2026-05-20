@@ -11,15 +11,20 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
+	"github.com/nickschuch/pinchy/internal/config"
 	"github.com/nickschuch/pinchy/internal/dockerx"
+	pinchyenv "github.com/nickschuch/pinchy/internal/env"
 )
 
 // Default image references. Override per-invocation with --agent-image,
-// --docker-image, or --proxy-image, or via the corresponding env vars.
+// --docker-image, --proxy-image, --console-image, or --llmproxy-image, or via
+// the corresponding env vars.
 const (
-	DefaultAgentImage  = "ghcr.io/nickschuch/pinchy-agent:latest"
-	DefaultDockerImage = "ghcr.io/nickschuch/pinchy-docker:latest"
-	DefaultProxyImage  = "ghcr.io/nickschuch/pinchy-proxy:latest"
+	DefaultAgentImage    = "ghcr.io/nickschuch/pinchy-agent:latest"
+	DefaultDockerImage   = "ghcr.io/nickschuch/pinchy-docker:latest"
+	DefaultProxyImage    = "ghcr.io/nickschuch/pinchy-proxy:latest"
+	DefaultConsoleImage  = "ghcr.io/nickschuch/pinchy-console:latest"
+	DefaultLLMProxyImage = "ghcr.io/nickschuch/pinchy-llmproxy:latest"
 )
 
 // resolveImage chooses the effective image reference for one role using the
@@ -98,10 +103,33 @@ func addServiceFlag(cmd *cobra.Command, target *string) {
 	cmd.Flags().StringVar(target, "service", "agent", "service to target: agent or docker")
 }
 
-// ensureSharedInfra ensures the shared bridge network and Traefik proxy
-// container exist and are running. It is called from create, start, restart,
-// and init so callers do not need to run `pinchy init` separately.
-func ensureSharedInfra(ctx context.Context, cli *client.Client, proxyImage, version string, healthTimeout time.Duration) error {
+// ensureSharedInfra ensures the shared bridge network, Traefik proxy,
+// discovery console, and (when configured) the LLM proxy exist and are
+// running. It is called from create, start, restart, and init so callers do
+// not need to run `pinchy init` separately.
+//
+// consoleImage may be empty; when it is, the console container is skipped.
+//
+// llmproxyCfg may be nil; when it is, or when AnthropicAPIKey is empty, the
+// LLM proxy is not started. When it is non-nil and has a key, the LLM proxy
+// is started and its failure is fatal (not best-effort), because agents are
+// hard-wired to use it.
+//
+// When recreate is true the proxy, console, and llmproxy containers are
+// removed before the normal ensure flow. The shared network is never removed.
+func ensureSharedInfra(ctx context.Context, cli *client.Client, proxyImage, consoleImage, llmproxyImage, version string, healthTimeout time.Duration, recreate bool, llmproxyCfg *config.LLMProxyConfig) error {
+	if recreate {
+		if err := dockerx.RemoveContainer(ctx, cli, pinchyenv.ProxyContainerName, true); err != nil {
+			return fmt.Errorf("removing proxy container: %w", err)
+		}
+		if err := dockerx.RemoveContainer(ctx, cli, pinchyenv.ConsoleContainerName, true); err != nil {
+			return fmt.Errorf("removing console container: %w", err)
+		}
+		if err := dockerx.RemoveContainer(ctx, cli, pinchyenv.LLMProxyContainerName, true); err != nil {
+			return fmt.Errorf("removing llmproxy container: %w", err)
+		}
+	}
+
 	if err := dockerx.EnsureSharedNetwork(ctx, cli, version); err != nil {
 		return fmt.Errorf("ensuring shared network: %w", err)
 	}
@@ -119,5 +147,39 @@ func ensureSharedInfra(ctx context.Context, cli *client.Client, proxyImage, vers
 	if err := dockerx.WaitForProxyHealthy(waitCtx, cli, 2*time.Second); err != nil {
 		return fmt.Errorf("proxy never became healthy: %w", err)
 	}
+
+	// Console is best-effort: if the image is unavailable or the container
+	// fails to start, print a warning but do not block the rest of init.
+	if consoleImage != "" {
+		if err := dockerx.EnsureImageLocal(ctx, cli, consoleImage); err == nil {
+			if _, err := dockerx.EnsureConsole(ctx, cli, dockerx.ConsoleConfig{
+				Image:   consoleImage,
+				Version: version,
+			}); err != nil {
+				fmt.Printf("warning: could not start console container: %v\n", err)
+			}
+		}
+	}
+
+	// LLM proxy is FATAL when configured: agents are hard-wired to use it, so
+	// a configured-but-broken proxy would cause silent failures for every agent.
+	if llmproxyCfg != nil && llmproxyCfg.AnthropicAPIKey != "" {
+		if err := dockerx.EnsureImageLocal(ctx, cli, llmproxyImage); err != nil {
+			return fmt.Errorf("pulling llmproxy image: %w", err)
+		}
+		if _, err := dockerx.EnsureLLMProxy(ctx, cli, dockerx.LLMProxyConfig{
+			Image:           llmproxyImage,
+			Version:         version,
+			AnthropicAPIKey: llmproxyCfg.AnthropicAPIKey,
+		}); err != nil {
+			return fmt.Errorf("ensuring llmproxy: %w", err)
+		}
+		llmWaitCtx, llmCancel := waitContext(ctx, healthTimeout)
+		defer llmCancel()
+		if err := dockerx.WaitForLLMProxyHealthy(llmWaitCtx, cli, 3*time.Second); err != nil {
+			return fmt.Errorf("llmproxy never became healthy: %w", err)
+		}
+	}
+
 	return nil
 }

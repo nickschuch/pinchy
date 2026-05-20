@@ -29,6 +29,18 @@ type EnvConfig struct {
 	Env map[string]string `yaml:"env"`
 }
 
+// LLMProxyConfig holds configuration for the optional shared LLM proxy
+// container (pinchy-llmproxy). When present and non-empty, pinchy starts a
+// LiteLLM-based Anthropic proxy container that holds the real API key. Agent
+// containers connect to it using the hardcoded shared token
+// (env.LLMProxyToken) — they never receive the real key.
+type LLMProxyConfig struct {
+	// AnthropicAPIKey is the real Anthropic API key. It is injected into the
+	// pinchy-llmproxy container at start time and is never passed to any agent
+	// container.
+	AnthropicAPIKey string `yaml:"anthropic_api_key"`
+}
+
 // Config is the top-level structure for the pinchy configuration file.
 type Config struct {
 	// Env is a map of environment variable names to values that are injected
@@ -39,6 +51,16 @@ type Config struct {
 	// Values here are merged on top of the global Env entries, with
 	// per-environment values winning.
 	Environments map[string]EnvConfig `yaml:"environments"`
+
+	// LLMProxy configures the optional shared LLM proxy container. If nil or
+	// if AnthropicAPIKey is empty, the proxy is not started.
+	LLMProxy *LLMProxyConfig `yaml:"llm_proxy,omitempty"`
+}
+
+// LLMProxyEnabled returns true when the config includes a non-empty
+// LLM proxy Anthropic API key.
+func (c *Config) LLMProxyEnabled() bool {
+	return c.LLMProxy != nil && c.LLMProxy.AnthropicAPIKey != ""
 }
 
 // DefaultPath returns the path to the config file according to the XDG Base
@@ -110,7 +132,8 @@ func (c *Config) EnvFor(name string) map[string]string {
 }
 
 // validate checks that every key in every env map is a valid environment
-// variable name (non-empty, no '=' character, no NUL byte).
+// variable name (non-empty, no '=' character, no NUL byte), and that any
+// llm_proxy block has the required fields.
 func validate(cfg *Config) error {
 	for k := range cfg.Env {
 		if err := validateKey(k); err != nil {
@@ -123,6 +146,9 @@ func validate(cfg *Config) error {
 				return fmt.Errorf("environments.%s: %w", envName, err)
 			}
 		}
+	}
+	if cfg.LLMProxy != nil && cfg.LLMProxy.AnthropicAPIKey == "" {
+		return errors.New("llm_proxy.anthropic_api_key must not be empty when llm_proxy is set")
 	}
 	return nil
 }

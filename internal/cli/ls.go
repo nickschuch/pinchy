@@ -138,6 +138,16 @@ func newLsCmd() *cobra.Command {
 				return err
 			}
 
+			consoleSvc, consoleFound, err := dockerx.ConsoleStatus(ctx, cli)
+			if err != nil {
+				return err
+			}
+
+			llmproxySvc, llmproxyFound, err := dockerx.LLMProxyStatus(ctx, cli)
+			if err != nil {
+				return err
+			}
+
 			out := cmd.OutOrStdout()
 
 			if quiet {
@@ -151,6 +161,12 @@ func newLsCmd() *cobra.Command {
 				services := []env.Service{}
 				if proxyFound {
 					services = append(services, proxySvc)
+				}
+				if consoleFound {
+					services = append(services, consoleSvc)
+				}
+				if llmproxyFound {
+					services = append(services, llmproxySvc)
 				}
 				return json.NewEncoder(out).Encode(lsOutput{
 					Environments: envs,
@@ -188,10 +204,14 @@ func newLsCmd() *cobra.Command {
 				if isTTY {
 					status = style.Render(label)
 				}
+				workdirCell := e.Workdir
+				if e.WorktreeBranch != "" {
+					workdirCell = e.Workdir + " [worktree: " + e.WorktreeBranch + "]"
+				}
 				envRows = append(envRows, []string{
 					e.Name,
 					status,
-					e.Workdir,
+					workdirCell,
 					created,
 				})
 			}
@@ -200,37 +220,47 @@ func newLsCmd() *cobra.Command {
 			return err
 		}
 
-		// Services table — only rendered when the proxy is known.
-		if !proxyFound {
+		// Services table — only rendered when at least one service is known.
+		if !proxyFound && !consoleFound && !llmproxyFound {
 			return nil
 		}
 
 		fmt.Fprintln(out, renderHeading("SERVICES"))
-			svcHeaders := []string{"NAME", "STATUS", "PORTS", "CREATED"}
-			svcRows := make([][]string, 0, 1)
+			svcHeaders := []string{"NAME", "STATUS", "PORTS", "URL", "CREATED"}
+			svcRows := make([][]string, 0, 2)
 
-			created := ""
-			if !proxySvc.Created.IsZero() {
-				created = proxySvc.Created.Format("2006-01-02 15:04")
+			addSvcRow := func(svc env.Service, url string) {
+				created := ""
+				if !svc.Created.IsZero() {
+					created = svc.Created.Format("2006-01-02 15:04")
+				}
+				ports := make([]string, 0, len(svc.Ports))
+				for _, p := range svc.Ports {
+					ports = append(ports, fmt.Sprintf("%d", p))
+				}
+				label, style := resolveStatus(svc.Status, svc.Health)
+				statusStr := label
+				if isTTY {
+					statusStr = style.Render(label)
+				}
+				svcRows = append(svcRows, []string{
+					svc.Name,
+					statusStr,
+					strings.Join(ports, ", "),
+					url,
+					created,
+				})
 			}
 
-			ports := make([]string, 0, len(proxySvc.Ports))
-			for _, p := range proxySvc.Ports {
-				ports = append(ports, fmt.Sprintf("%d", p))
+			if proxyFound {
+				addSvcRow(proxySvc, "")
 			}
-
-			label, style := resolveStatus(proxySvc.Status, proxySvc.Health)
-			statusStr := label
-			if isTTY {
-				statusStr = style.Render(label)
+			if consoleFound {
+				addSvcRow(consoleSvc, "http://console.pinchy.localhost:8080")
 			}
-
-			svcRows = append(svcRows, []string{
-				proxySvc.Name,
-				statusStr,
-				strings.Join(ports, ", "),
-				created,
-			})
+			if llmproxyFound {
+				addSvcRow(llmproxySvc, "http://llmproxy.pinchy.localhost:8080 (admin UI)")
+			}
 
 			return pinchytable.Print(out, svcHeaders, svcRows)
 		},

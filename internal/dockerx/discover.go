@@ -48,6 +48,8 @@ func ResolveEnv(ctx context.Context, cli *client.Client, envName string) (pinchy
 			out.AgentStatus = c.Status
 			out.AgentRunning = c.State == "running"
 			out.Workdir = c.Labels[pinchyenv.LabelWorkdir]
+			out.WorktreeRepo = c.Labels[pinchyenv.LabelWorktreeRepo]
+			out.WorktreeBranch = c.Labels[pinchyenv.LabelWorktreeBranch]
 			out.Version = c.Labels[pinchyenv.LabelVersion]
 			if t, err := time.Parse(time.RFC3339, c.Labels[pinchyenv.LabelCreated]); err == nil {
 				out.Created = t
@@ -87,6 +89,8 @@ func ListEnvs(ctx context.Context, cli *client.Client) ([]pinchyenv.Environment,
 			e.AgentStatus = c.Status
 			e.AgentRunning = c.State == "running"
 			e.Workdir = c.Labels[pinchyenv.LabelWorkdir]
+			e.WorktreeRepo = c.Labels[pinchyenv.LabelWorktreeRepo]
+			e.WorktreeBranch = c.Labels[pinchyenv.LabelWorktreeBranch]
 			e.Version = c.Labels[pinchyenv.LabelVersion]
 			if t, err := time.Parse(time.RFC3339, c.Labels[pinchyenv.LabelCreated]); err == nil {
 				e.Created = t
