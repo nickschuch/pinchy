@@ -1,4 +1,4 @@
-# Pinchy
+# 🦞 Pinchy
 
 Pinchy is a CLI for managing containerised development environments, each
 consisting of an [opencode](https://opencode.ai) agent backed by a dedicated
