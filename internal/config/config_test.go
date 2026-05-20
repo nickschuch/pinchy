@@ -329,6 +329,277 @@ llm_proxy:
 }
 
 // --------------------------------------------------------------------------
+// Mounts — Load / validate
+// --------------------------------------------------------------------------
+
+func TestLoad_MountsGlobal(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: ~/.aws
+    target: /home/skpr/.aws
+  - source: ~/.skpr
+    target: /home/skpr/.skpr
+    mode: rw
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.Mounts) != 2 {
+		t.Fatalf("expected 2 global mounts, got %d", len(cfg.Mounts))
+	}
+	if cfg.Mounts[0].Source != "~/.aws" {
+		t.Errorf("Mounts[0].Source = %q, want ~/.aws", cfg.Mounts[0].Source)
+	}
+	if cfg.Mounts[0].Target != "/home/skpr/.aws" {
+		t.Errorf("Mounts[0].Target = %q, want /home/skpr/.aws", cfg.Mounts[0].Target)
+	}
+	if cfg.Mounts[0].Mode != "" {
+		t.Errorf("Mounts[0].Mode = %q, want empty (ro default)", cfg.Mounts[0].Mode)
+	}
+	if cfg.Mounts[1].Mode != "rw" {
+		t.Errorf("Mounts[1].Mode = %q, want rw", cfg.Mounts[1].Mode)
+	}
+}
+
+func TestLoad_MountsPerEnv(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+environments:
+  myenv:
+    mounts:
+      - source: ~/.ssh
+        target: /home/skpr/.ssh
+        mode: ro
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ec := cfg.Environments["myenv"]
+	if len(ec.Mounts) != 1 {
+		t.Fatalf("expected 1 per-env mount, got %d", len(ec.Mounts))
+	}
+	if ec.Mounts[0].Target != "/home/skpr/.ssh" {
+		t.Errorf("Mounts[0].Target = %q, want /home/skpr/.ssh", ec.Mounts[0].Target)
+	}
+}
+
+func TestMountsFor_GlobalOnly(t *testing.T) {
+	cfg := &Config{
+		Mounts: []Mount{
+			{Source: "~/.aws", Target: "/home/skpr/.aws"},
+			{Source: "~/.skpr", Target: "/home/skpr/.skpr"},
+		},
+	}
+	got := cfg.MountsFor("anyenv")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(got))
+	}
+	if got[0].Target != "/home/skpr/.aws" {
+		t.Errorf("got[0].Target = %q, want /home/skpr/.aws", got[0].Target)
+	}
+}
+
+func TestMountsFor_PerEnvReplacesGlobal(t *testing.T) {
+	cfg := &Config{
+		Mounts: []Mount{
+			{Source: "~/.aws", Target: "/home/skpr/.aws", Mode: "ro"},
+			{Source: "~/.skpr", Target: "/home/skpr/.skpr"},
+		},
+		Environments: map[string]EnvConfig{
+			"myenv": {
+				Mounts: []Mount{
+					// Same target — should replace the global entry.
+					{Source: "/custom/aws", Target: "/home/skpr/.aws", Mode: "rw"},
+					// New target — should be appended.
+					{Source: "~/.ssh", Target: "/home/skpr/.ssh"},
+				},
+			},
+		},
+	}
+	got := cfg.MountsFor("myenv")
+	if len(got) != 3 {
+		t.Fatalf("expected 3 mounts after merge, got %d: %+v", len(got), got)
+	}
+	// Target /home/skpr/.aws should now point at /custom/aws with mode rw.
+	var awsMount Mount
+	for _, m := range got {
+		if m.Target == "/home/skpr/.aws" {
+			awsMount = m
+		}
+	}
+	if awsMount.Source != "/custom/aws" {
+		t.Errorf("aws mount Source = %q, want /custom/aws", awsMount.Source)
+	}
+	if awsMount.Mode != "rw" {
+		t.Errorf("aws mount Mode = %q, want rw", awsMount.Mode)
+	}
+}
+
+func TestMountsFor_PerEnvAppendsNew(t *testing.T) {
+	cfg := &Config{
+		Mounts: []Mount{
+			{Source: "~/.aws", Target: "/home/skpr/.aws"},
+		},
+		Environments: map[string]EnvConfig{
+			"myenv": {
+				Mounts: []Mount{
+					{Source: "~/.skpr", Target: "/home/skpr/.skpr"},
+				},
+			},
+		},
+	}
+	got := cfg.MountsFor("myenv")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(got))
+	}
+}
+
+func TestMountsFor_UnknownEnvGetsOnlyGlobal(t *testing.T) {
+	cfg := &Config{
+		Mounts: []Mount{
+			{Source: "~/.aws", Target: "/home/skpr/.aws"},
+		},
+		Environments: map[string]EnvConfig{
+			"other": {
+				Mounts: []Mount{
+					{Source: "~/.skpr", Target: "/home/skpr/.skpr"},
+				},
+			},
+		},
+	}
+	got := cfg.MountsFor("notregistered")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 mount for unknown env, got %d", len(got))
+	}
+}
+
+func TestMountsFor_ReturnsFreshCopy(t *testing.T) {
+	cfg := &Config{
+		Mounts: []Mount{
+			{Source: "~/.aws", Target: "/home/skpr/.aws"},
+		},
+	}
+	a := cfg.MountsFor("anyenv")
+	a[0].Mode = "rw"
+	b := cfg.MountsFor("anyenv")
+	if b[0].Mode != "" {
+		t.Errorf("MountsFor returned same slice; mutation leaked: Mode = %q", b[0].Mode)
+	}
+}
+
+func TestLoad_InvalidMount_NoSource(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: ""
+    target: /home/skpr/.aws
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for empty source, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_NoTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: ~/.aws
+    target: ""
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for empty target, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_RelativeTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: ~/.aws
+    target: home/skpr/.aws
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for relative target, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_BadMode(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: ~/.aws
+    target: /home/skpr/.aws
+    mode: rwx
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for invalid mode, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_ReservedTargetData(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: /some/dir
+    target: /data
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for reserved target /data, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_ReservedTargetSock(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: /some/dir
+    target: /run/user/1000
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for reserved target /run/user/1000, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_DuplicateTargetGlobal(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+mounts:
+  - source: ~/.aws
+    target: /home/skpr/.aws
+  - source: /other/aws
+    target: /home/skpr/.aws
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for duplicate target in global mounts, got nil")
+	}
+}
+
+func TestLoad_InvalidMount_PerEnvRelativeTarget(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "config.yaml", `
+environments:
+  myenv:
+    mounts:
+      - source: ~/.aws
+        target: relative/path
+`)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected validation error for relative target in per-env mounts, got nil")
+	}
+}
+
+// --------------------------------------------------------------------------
 // validateKey
 // --------------------------------------------------------------------------
 

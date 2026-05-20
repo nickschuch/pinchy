@@ -22,6 +22,12 @@ type AgentSpec struct {
 	// (e.g. DOCKER_HOST); if a key appears in both, the caller-supplied value
 	// wins.
 	Env map[string]string
+	// ExtraMounts is the list of additional bind-mounts to attach to the agent
+	// container (e.g. ~/.aws, ~/.skpr). They are appended after the mandatory
+	// /data and /run/user/1000 mounts so they can never shadow pinchy's own
+	// mounts. Callers are expected to have already resolved ~ and verified that
+	// each source exists and is a directory.
+	ExtraMounts []mount.Mount
 }
 
 // DockerSpec describes the dind-rootless docker daemon container of a pinchy
@@ -66,13 +72,16 @@ func AgentConfig(s AgentSpec) (*container.Config, *container.HostConfig) {
 		OpenStdin:    true,
 		Labels:       s.Labels,
 	}
+	mounts := []mount.Mount{
+		{Type: mount.TypeBind, Source: s.HostWorkdir, Target: "/data"},
+		{Type: mount.TypeVolume, Source: s.SockVolume, Target: "/run/user/1000"},
+	}
+	mounts = append(mounts, s.ExtraMounts...)
+
 	host := &container.HostConfig{
 		RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyUnlessStopped},
-		Mounts: []mount.Mount{
-			{Type: mount.TypeBind, Source: s.HostWorkdir, Target: "/data"},
-			{Type: mount.TypeVolume, Source: s.SockVolume, Target: "/run/user/1000"},
-		},
-		NetworkMode: container.NetworkMode(s.Network),
+		Mounts:        mounts,
+		NetworkMode:   container.NetworkMode(s.Network),
 	}
 	return cfg, host
 }

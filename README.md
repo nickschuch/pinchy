@@ -214,11 +214,28 @@ A missing file is not an error.
 env:
   GITHUB_TOKEN: ghp_...
 
-# Per-environment overrides (merged on top of the global env block).
+# Host directories to bind-mount into every agent container.
+# Source supports "~/" expansion. Target must be an absolute path inside the
+# container. Mode defaults to "ro" (read-only); set "rw" for read-write.
+mounts:
+  - source: ~/.aws
+    target: /home/skpr/.aws
+  - source: ~/.skpr
+    target: /home/skpr/.skpr
+
+# Per-environment overrides (merged on top of the global env/mounts blocks).
 environments:
   example:
     env:
       SOME_VAR: override-value
+    mounts:
+      # Replaces the global ~/.aws entry for this environment.
+      - source: ~/work/aws-profile
+        target: /home/skpr/.aws
+        mode: rw
+      # Additional mount only for this environment.
+      - source: ~/.ssh
+        target: /home/skpr/.ssh
 
 # LLM proxy (optional). When set, pinchy starts a shared LiteLLM container
 # (pinchy-llmproxy) that holds the real Anthropic key. Agents are pre-wired
@@ -235,6 +252,40 @@ Later sources win for the same key:
 2. Per-environment `env:` block
 3. `--env-file` files (in order)
 4. `-e` / `--env` flags
+
+### Mount precedence
+
+For the same `target`, a per-environment mount replaces the global mount.
+New targets from the per-environment list are appended after the global ones.
+
+### Host directory mounts
+
+Pinchy can bind-mount host directories into every agent container — useful for
+sharing credential directories such as `~/.aws`, `~/.skpr`, or `~/.ssh`
+without baking secrets into the image.
+
+Mounts are configured in the `mounts:` block of the config file (global or
+per-environment). A mount entry requires:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `source` | yes | Host path. `~/` is expanded to `$HOME`. Must exist and be a directory. |
+| `target` | yes | Absolute path inside the container where the directory is mounted. |
+| `mode` | no | `ro` (read-only, **default**) or `rw` (read-write). |
+
+**Merge semantics:** per-environment mounts are merged on top of global mounts.
+A per-environment entry with the same `target` as a global entry *replaces* it;
+entries with new targets are appended.
+
+**Reserved targets:** `/data` and `/run/user/1000` are controlled by pinchy
+and cannot be overridden.
+
+**Mounts are baked in at create time.** To change mounts, recreate the
+environment:
+
+```
+pinchy rm <name> && pinchy create <name>
+```
 
 ### Authentication
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types/mount"
 	"github.com/spf13/cobra"
 
 	"github.com/nickschuch/pinchy/internal/config"
@@ -81,7 +82,27 @@ Environment variable values are never printed; only their names are shown.
 
 NOTE: environment variables are baked into the container at create time.
 Changes to the config file take effect only after recreating the
-environment (pinchy rm <name> && pinchy create <name>).`,
+environment (pinchy rm <name> && pinchy create <name>).
+
+Host directory mounts are read from the config file's "mounts:" block.
+Each entry requires an absolute container target path. The source path
+supports "~/" expansion. Mounts default to read-only ("ro"); set
+mode: rw for read-write access.
+
+Example config snippet:
+
+  mounts:
+    - source: ~/.aws
+      target: /home/skpr/.aws
+    - source: ~/.skpr
+      target: /home/skpr/.skpr
+
+Per-environment mounts can be added under:
+  environments.<name>.mounts:
+
+A mount whose source does not exist or is not a directory is an error.
+Like env vars, mounts are baked in at create time; recreate the
+environment to pick up changes.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := args[0]
@@ -171,6 +192,26 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 				fmt.Fprintf(cmd.OutOrStdout(), "Injecting environment variables: %s\n", strings.Join(keys, ", "))
 			}
 
+			// Resolve host directory mounts from the config file.
+			resolved, err := resolveMounts(cfg.MountsFor(name))
+			if err != nil {
+				return fmt.Errorf("resolving mounts: %w", err)
+			}
+			if len(resolved) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "Mounting host directories:\n")
+				for _, r := range resolved {
+					mode := "ro"
+					if !r.mount.ReadOnly {
+						mode = "rw"
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s -> %s (%s)\n", r.origSource, r.mount.Target, mode)
+				}
+			}
+			extraMounts := make([]mount.Mount, len(resolved))
+			for i, r := range resolved {
+				extraMounts[i] = r.mount
+			}
+
 			created := time.Now().UTC().Format(time.RFC3339)
 
 			// Volumes + network — created first so containers can attach.
@@ -244,6 +285,7 @@ environment (pinchy rm <name> && pinchy create <name>).`,
 				Network:     netName,
 				Labels:      agentLabels,
 				Env:         injectedEnv,
+				ExtraMounts: extraMounts,
 			})
 			fmt.Fprintf(cmd.OutOrStdout(), "Starting agent...\n")
 			agentID, err := dockerx.CreateAndStart(ctx, cli, pinchyenv.AgentContainerName(name), agentCfg, agentHost, netName)
