@@ -64,6 +64,7 @@ func TestDashboardEnvWithSessions(t *testing.T) {
 				Model:     SessionModel{ID: "claude-opus-4", ProviderID: "anthropic"},
 				Directory: "/data",
 				UpdatedMS: updated.UnixMilli(),
+				Status:    SessionStatus{Type: "busy"},
 			},
 		},
 	}
@@ -111,6 +112,58 @@ func TestDashboardEnvWithSessions(t *testing.T) {
 	wantConsoleLink := "http://myenv.pinchy.localhost:4096/"
 	if !strings.Contains(html, wantConsoleLink) {
 		t.Errorf("expected env console link %q in output", wantConsoleLink)
+	}
+
+	// Session status badge should show "running" for a busy session.
+	if !strings.Contains(html, "badge-busy") {
+		t.Error("expected badge-busy class in output for busy session")
+	}
+	if !strings.Contains(html, "running") {
+		t.Error("expected 'running' status label in output for busy session")
+	}
+}
+
+// TestDashboardSessionStatusBadges verifies that all three session status
+// variants (idle, busy, retry) render the correct badge.
+func TestDashboardSessionStatusBadges(t *testing.T) {
+	env := EnvSnapshot{
+		Name:   "testenv",
+		Status: "running",
+		Sessions: []SessionInfo{
+			{ID: "ses_1", Title: "Idle session", Status: SessionStatus{Type: "idle"}},
+			{ID: "ses_2", Title: "Busy session", Status: SessionStatus{Type: "busy"}},
+			{ID: "ses_3", Title: "Retry session", Status: SessionStatus{Type: "retry", Attempt: 1, Message: "rate limited"}},
+		},
+	}
+
+	data := struct {
+		Envs        []EnvSnapshot
+		LastUpdated time.Time
+	}{
+		Envs:        []EnvSnapshot{env},
+		LastUpdated: time.Now(),
+	}
+
+	html := renderDashboard(t, data)
+
+	if !strings.Contains(html, "badge-idle") {
+		t.Error("expected badge-idle in output")
+	}
+	if !strings.Contains(html, "waiting") {
+		t.Error("expected 'waiting' label for idle session")
+	}
+	if !strings.Contains(html, "badge-busy") {
+		t.Error("expected badge-busy in output")
+	}
+	if !strings.Contains(html, "badge-retry") {
+		t.Error("expected badge-retry in output")
+	}
+	if !strings.Contains(html, "retrying") {
+		t.Error("expected 'retrying' label for retry session")
+	}
+	// Retry tooltip should include the error message.
+	if !strings.Contains(html, "rate limited") {
+		t.Error("expected retry message 'rate limited' in output")
 	}
 }
 

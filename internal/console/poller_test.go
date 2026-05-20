@@ -89,39 +89,128 @@ func TestResolveEnvStatus(t *testing.T) {
 }
 
 // TestFetchSessionsSuccess verifies that fetchSessions decodes a valid JSON
-// session list from a mock opencode server.
+// session list from a mock opencode server and merges in session status.
 func TestFetchSessionsSuccess(t *testing.T) {
-	want := []SessionInfo{
+	wantSessions := []SessionInfo{
 		{ID: "ses_abc", Title: "My first task", Agent: "plan", Model: SessionModel{ID: "claude-opus-4"}},
 		{ID: "ses_def", Title: "Fix the bug", Agent: "code"},
 	}
+	wantStatus := map[string]SessionStatus{
+		"ses_abc": {Type: "busy"},
+		"ses_def": {Type: "idle"},
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/session" {
-			http.NotFound(w, r)
-			return
-		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(want)
+		switch r.URL.Path {
+		case "/session":
+			_ = json.NewEncoder(w).Encode(wantSessions)
+		case "/session/status":
+			_ = json.NewEncoder(w).Encode(wantStatus)
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 
 	p := &Poller{http: &http.Client{}}
-	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", "", "")
+	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
 
 	if errMsg != "" {
 		t.Fatalf("unexpected error: %s", errMsg)
 	}
-	if len(sessions) != len(want) {
-		t.Fatalf("got %d sessions, want %d", len(sessions), len(want))
+	if len(sessions) != len(wantSessions) {
+		t.Fatalf("got %d sessions, want %d", len(sessions), len(wantSessions))
 	}
 	for i, s := range sessions {
-		if s.ID != want[i].ID {
-			t.Errorf("session[%d].ID = %q, want %q", i, s.ID, want[i].ID)
+		if s.ID != wantSessions[i].ID {
+			t.Errorf("session[%d].ID = %q, want %q", i, s.ID, wantSessions[i].ID)
 		}
-		if s.Title != want[i].Title {
-			t.Errorf("session[%d].Title = %q, want %q", i, s.Title, want[i].Title)
+		if s.Title != wantSessions[i].Title {
+			t.Errorf("session[%d].Title = %q, want %q", i, s.Title, wantSessions[i].Title)
 		}
+	}
+	// Verify status was merged.
+	if sessions[0].Status.Type != "busy" {
+		t.Errorf("session[0].Status.Type = %q, want %q", sessions[0].Status.Type, "busy")
+	}
+	if sessions[1].Status.Type != "idle" {
+		t.Errorf("session[1].Status.Type = %q, want %q", sessions[1].Status.Type, "idle")
+	}
+}
+
+// TestFetchSessionsStatusFallback verifies that sessions are still returned
+// (with idle status) when the /session/status endpoint fails.
+func TestFetchSessionsStatusFallback(t *testing.T) {
+	wantSessions := []SessionInfo{
+		{ID: "ses_abc", Title: "My first task", Agent: "plan"},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/session":
+			_ = json.NewEncoder(w).Encode(wantSessions)
+		case "/session/status":
+			http.Error(w, "not implemented", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
+
+	if errMsg != "" {
+		t.Fatalf("unexpected error: %s", errMsg)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("got %d sessions, want 1", len(sessions))
+	}
+	// Status should default to idle when /session/status fails.
+	if sessions[0].Status.Type != "idle" {
+		t.Errorf("session[0].Status.Type = %q, want %q", sessions[0].Status.Type, "idle")
+	}
+}
+
+// TestFetchSessionsRetryStatus verifies that retry status fields are decoded
+// correctly and merged into the session.
+func TestFetchSessionsRetryStatus(t *testing.T) {
+	wantSessions := []SessionInfo{
+		{ID: "ses_abc", Title: "Retrying task", Agent: "plan"},
+	}
+	wantStatus := map[string]SessionStatus{
+		"ses_abc": {Type: "retry", Attempt: 2, Message: "rate limited", Next: 1700000000000},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/session":
+			_ = json.NewEncoder(w).Encode(wantSessions)
+		case "/session/status":
+			_ = json.NewEncoder(w).Encode(wantStatus)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := &Poller{http: &http.Client{}}
+	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
+
+	if errMsg != "" {
+		t.Fatalf("unexpected error: %s", errMsg)
+	}
+	if sessions[0].Status.Type != "retry" {
+		t.Errorf("Status.Type = %q, want %q", sessions[0].Status.Type, "retry")
+	}
+	if sessions[0].Status.Attempt != 2 {
+		t.Errorf("Status.Attempt = %d, want 2", sessions[0].Status.Attempt)
+	}
+	if sessions[0].Status.Message != "rate limited" {
+		t.Errorf("Status.Message = %q, want %q", sessions[0].Status.Message, "rate limited")
 	}
 }
 
@@ -135,7 +224,7 @@ func TestFetchSessionsUnauthorized(t *testing.T) {
 	defer srv.Close()
 
 	p := &Poller{http: &http.Client{}}
-	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", "", "")
+	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
 
 	if sessions != nil {
 		t.Errorf("expected nil sessions on 401, got %v", sessions)
@@ -149,12 +238,16 @@ func TestFetchSessionsUnauthorized(t *testing.T) {
 // message without panicking.
 func TestFetchSessionsServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		if r.URL.Path == "/session" {
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 
 	p := &Poller{http: &http.Client{}}
-	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", "", "")
+	sessions, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", "", "")
 
 	if sessions != nil {
 		t.Errorf("expected nil sessions on 500, got %v", sessions)
@@ -177,17 +270,24 @@ func TestFetchSessionsBasicAuth(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]SessionInfo{})
+		switch r.URL.Path {
+		case "/session":
+			_ = json.NewEncoder(w).Encode([]SessionInfo{})
+		case "/session/status":
+			_ = json.NewEncoder(w).Encode(map[string]SessionStatus{})
+		default:
+			http.NotFound(w, r)
+		}
 	}))
 	defer srv.Close()
 
 	p := &Poller{http: &http.Client{}}
-	_, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", wantUser, wantPass)
+	_, errMsg := p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", wantUser, wantPass)
 	if errMsg != "" {
 		t.Fatalf("unexpected error with correct credentials: %s", errMsg)
 	}
 
-	_, errMsg = p.fetchSessionsFromURL(srv.URL+"/session", wantUser, "wrong")
+	_, errMsg = p.fetchSessionsFromURL(srv.URL+"/session", srv.URL+"/session/status", wantUser, "wrong")
 	if errMsg == "" {
 		t.Error("expected error with wrong credentials")
 	}

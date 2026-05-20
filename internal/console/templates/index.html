@@ -101,6 +101,11 @@
     .badge-paused,
     .badge-unknown   { background: rgba(136,136,136,0.12);color: var(--muted); }
 
+    /* Session-level status badges */
+    .badge-idle  { background: rgba(136,136,136,0.12); color: var(--muted); }
+    .badge-busy  { background: rgba(76,175,110,0.15);  color: var(--good); }
+    .badge-retry { background: rgba(224,160,48,0.15);  color: var(--warn); }
+
     table {
       width: 100%;
       border-collapse: collapse;
@@ -205,6 +210,7 @@
       <thead>
         <tr>
           <th>Session</th>
+          <th>Status</th>
           <th>Agent</th>
           <th>Model</th>
           <th>Updated</th>
@@ -216,6 +222,15 @@
         <tr>
           <td class="td-title" title="{{.ID}}">
             {{if .Title}}{{.Title}}{{else}}<span style="color:var(--muted)">untitled</span>{{end}}
+          </td>
+          <td>
+            {{if eq .Status.Type "busy"}}
+            <span class="badge badge-busy">running</span>
+            {{else if eq .Status.Type "retry"}}
+            <span class="badge badge-retry" title="{{.Status.Message}} (attempt {{.Status.Attempt}})">retrying</span>
+            {{else}}
+            <span class="badge badge-idle">waiting</span>
+            {{end}}
           </td>
           <td><span class="chip">{{if .Agent}}{{.Agent}}{{else}}&mdash;{{end}}</span></td>
           <td><span class="chip">{{if .Model.ID}}{{.Model.ID}}{{else}}&mdash;{{end}}</span></td>

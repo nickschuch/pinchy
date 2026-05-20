@@ -28,12 +28,36 @@ type SessionInfo struct {
 	Directory string `json:"directory"`
 	// UpdatedMS is the "updated" timestamp in milliseconds since epoch.
 	UpdatedMS int64 `json:"updated,omitempty"`
+	// Status is the live status of the session fetched from GET /session/status.
+	// It is not part of the opencode JSON response; it is populated separately.
+	Status SessionStatus `json:"-"`
 }
 
 // SessionModel carries the provider and model ID embedded in a session.
 type SessionModel struct {
 	ID         string `json:"id"`
 	ProviderID string `json:"providerID"`
+}
+
+// SessionStatus represents the live running state of an opencode session as
+// returned by GET /session/status on the agent's opencode server.
+//
+// The Type field is one of:
+//   - "idle"  — the session is waiting for user input
+//   - "busy"  — the agent is actively processing / running tools
+//   - "retry" — the agent hit an error and is retrying
+//
+// For "retry", Attempt, Message, and Next are populated.
+type SessionStatus struct {
+	// Type is the discriminant: "idle", "busy", or "retry".
+	Type string `json:"type"`
+	// Attempt is the retry attempt number (only set when Type == "retry").
+	Attempt int `json:"attempt,omitempty"`
+	// Message is the retry error message (only set when Type == "retry").
+	Message string `json:"message,omitempty"`
+	// Next is the Unix millisecond timestamp of the next retry attempt
+	// (only set when Type == "retry").
+	Next int64 `json:"next,omitempty"`
 }
 
 // sessionInfoTime returns UpdatedMS as a time.Time. Zero when unset.

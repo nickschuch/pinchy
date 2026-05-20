@@ -137,18 +137,44 @@ func resolveEnvStatus(e pinchyenv.Environment) string {
 
 // fetchSessions calls GET /session on the agent's opencode server, using
 // Basic Auth if OPENCODE_SERVER_PASSWORD is set in the container's env.
+// It also fetches GET /session/status to enrich each session with its live
+// running state (idle / busy / retry).
 func (p *Poller) fetchSessions(ctx context.Context, e pinchyenv.Environment) ([]SessionInfo, string) {
 	username, password := p.resolveAuth(ctx, e)
 	// The console container lives on pinchy-shared, same as the agents.
 	// Container-to-container DNS resolves pinchy-<env>-agent by name.
-	url := "http://" + pinchyenv.AgentContainerName(e.Name) + ":4096/session"
-	return p.fetchSessionsFromURL(url, username, password)
+	base := "http://" + pinchyenv.AgentContainerName(e.Name) + ":4096"
+	return p.fetchSessionsFromURL(base+"/session", base+"/session/status", username, password)
 }
 
 // fetchSessionsFromURL is the low-level implementation of fetchSessions. It is
 // extracted so tests can supply an arbitrary URL (via httptest.Server) without
 // needing a real Docker daemon.
-func (p *Poller) fetchSessionsFromURL(url, username, password string) ([]SessionInfo, string) {
+func (p *Poller) fetchSessionsFromURL(sessionsURL, statusURL, username, password string) ([]SessionInfo, string) {
+	sessions, fetchErr := p.fetchSessionList(sessionsURL, username, password)
+	if fetchErr != "" {
+		return nil, fetchErr
+	}
+
+	// Fetch live session statuses and merge them into the session list.
+	// A failure here is non-fatal — sessions are still shown, just without
+	// the live status indicator.
+	statusMap, _ := p.fetchSessionStatusMap(statusURL, username, password)
+	for i := range sessions {
+		if st, ok := statusMap[sessions[i].ID]; ok {
+			sessions[i].Status = st
+		} else {
+			// Default to idle when status is not available.
+			sessions[i].Status = SessionStatus{Type: "idle"}
+		}
+	}
+
+	return sessions, ""
+}
+
+// fetchSessionList performs the GET /session request and returns the decoded
+// session slice, or an error string on failure.
+func (p *Poller) fetchSessionList(url, username, password string) ([]SessionInfo, string) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Sprintf("building request: %v", err)
@@ -175,6 +201,35 @@ func (p *Poller) fetchSessionsFromURL(url, username, password string) ([]Session
 		return nil, fmt.Sprintf("decoding sessions: %v", err)
 	}
 	return sessions, ""
+}
+
+// fetchSessionStatusMap performs the GET /session/status request and returns
+// a map of sessionID → SessionStatus. On any error it returns an empty map
+// (callers treat status as optional).
+func (p *Poller) fetchSessionStatusMap(url, username, password string) (map[string]SessionStatus, string) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Sprintf("building status request: %v", err)
+	}
+	if password != "" {
+		req.SetBasicAuth(username, password)
+	}
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return nil, fmt.Sprintf("fetching session status: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Sprintf("session/status returned %s", resp.Status)
+	}
+
+	var statusMap map[string]SessionStatus
+	if err := json.NewDecoder(resp.Body).Decode(&statusMap); err != nil {
+		return nil, fmt.Sprintf("decoding session status: %v", err)
+	}
+	return statusMap, ""
 }
 
 // resolveAuth inspects the agent container to find OPENCODE_SERVER_PASSWORD
