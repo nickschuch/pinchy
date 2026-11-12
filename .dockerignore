@@ -1,0 +1,3 @@
+# Nothing in the build uses the context, so keep it small and secret-free.
+*
+!Dockerfile

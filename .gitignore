@@ -1,0 +1,6 @@
+# Real credentials; copy from github.env.example.
+github.env
+# Repositories mounted into the containers. The README keeps the directory
+# in git so it exists, owned by you, before Docker mounts it.
+workspace/*
+!workspace/README.md

@@ -1,0 +1,58 @@
+services:
+  # Named "docker" because the TLS cert dind generates is only valid for
+  # "docker", "localhost" and the container hostname.
+  docker:
+    image: docker:dind            # pin, e.g. docker:29-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: /certs
+    volumes:
+      - dind-data:/var/lib/docker
+      - dind-certs-client:/certs/client
+      # Same host directory at the same path as in t3code, so
+      # `docker run -v /workspace/...` sees the same files.
+      - ./workspace:/workspace
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  t3code:
+    build:
+      context: .
+      args:
+        # Match your host user (`id -u` / `id -g`).
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
+    init: true
+    depends_on:
+      docker:
+        condition: service_healthy
+    # GH_TOKEN (used by both the gh CLI and git over HTTPS) and the git
+    # identity (GIT_AUTHOR_*, GIT_COMMITTER_*).
+    env_file:
+      - path: github.env
+        required: false
+    environment:
+      DOCKER_HOST: tcp://docker:2376
+      DOCKER_TLS_VERIFY: "1"
+      DOCKER_CERT_PATH: /certs/client
+      # Label Claude requests as T3 Code instead of sdk-cli/sdk-ts, which drain
+      # the 5-hour usage window faster. Remove once this lands upstream:
+      # https://github.com/pingdotgg/t3code/pull/25597
+      CLAUDE_CODE_ENTRYPOINT: t3-code
+    ports:
+      - "3773:3773"
+    volumes:
+      - dind-certs-client:/certs/client:ro
+      # Also holds Claude Code's login (CLAUDE_CONFIG_DIR=/data/claude).
+      - t3-data:/data
+      - ./workspace:/workspace
+
+volumes:
+  dind-data:
+  dind-certs-client:
+  t3-data:
