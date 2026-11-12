@@ -51,7 +51,8 @@ The `docker` service runs **privileged**, which Docker-in-Docker needs.
    Then fill in your git identity and a `GH_TOKEN`. The token is used by
    `gh` and by `git` for HTTPS remotes. SSH-style GitHub remotes
    (`git@github.com:...`) are rewritten to HTTPS automatically.
-   `github.env` is git-ignored.
+   `github.env` is git-ignored. See [GitHub token](#github-token) for the
+   permissions it needs.
 
 4. **Match your host user (Linux).** The container user defaults to
    UID/GID 1000. If yours differ, export them so files in `workspace/` keep
@@ -94,6 +95,40 @@ The `docker` service runs **privileged**, which Docker-in-Docker needs.
    Open the `/pair#token=...` link it prints. Each token works once. After
    pairing, the browser stays signed in and you can use
    <http://localhost:3773> directly.
+
+## GitHub token
+
+Agents use the token to clone, push branches, open and update pull
+requests, and read CI results. Create it at
+<https://github.com/settings/tokens>.
+
+**Fine-grained token (recommended).** Set the resource owner to the user
+or organisation that owns your repositories, pick the repositories, and
+grant these repository permissions:
+
+| Permission      | Access         | Why                                                     |
+| --------------- | -------------- | ------------------------------------------------------- |
+| Contents        | Read and write | Clone, fetch and push branches                          |
+| Pull requests   | Read and write | Open, update, review and comment on PRs                 |
+| Metadata        | Read-only      | Required by GitHub for all fine-grained tokens           |
+| Commit statuses | Read-only      | Read CI status on PRs                                   |
+| Actions         | Read-only      | Read workflow runs and logs                             |
+| Issues          | Read and write | Optional: read and comment on issues                    |
+| Workflows       | Read and write | Optional: only if agents edit `.github/workflows/` files |
+
+A fine-grained token covers a single owner, so repositories across several
+organisations need a classic token or one token each. Some organisations
+must approve fine-grained tokens before they work.
+
+**Classic token.** Select `repo` and `read:org`. Add `workflow` if agents
+edit `.github/workflows/` files. If your organisation uses SAML single
+sign-on, authorise the token for it under **Configure SSO**.
+
+Check the token from inside the container:
+
+```sh
+docker compose exec t3code gh auth status
+```
 
 ## Pairing tokens
 
@@ -143,7 +178,8 @@ docker compose down -v                 # stop and delete all state, including th
   inside the privileged `docker` service. Treat the stack as you would
   a remote shell on your machine.
 - `GH_TOKEN` is available to every process in the container. Give it the
-  narrowest scopes you need.
+  narrowest permissions you need and limit it to the repositories you work
+  on (see [GitHub token](#github-token)).
 
 ## Roadmap
 
