@@ -4,3 +4,4 @@ github.env
 # in git so it exists, owned by you, before Docker mounts it.
 workspace/*
 !workspace/README.md
+.env
